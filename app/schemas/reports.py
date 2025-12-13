@@ -275,7 +275,7 @@ class ScheduledReport(BaseModel):
     name: str = Field(..., max_length=100, description="Nom du rapport")
     frequency: str = Field(
         ...,
-        regex="^(daily|weekly|monthly|quarterly|yearly)$",
+        pattern="^(daily|weekly|monthly|quarterly|yearly)$",
         description="Fréquence de génération"
     )
     sections: List[ReportSection]

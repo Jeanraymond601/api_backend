@@ -80,8 +80,8 @@ class Differences(BaseModel):
     comments_percentage: float
 
 class Insights(BaseModel):
-    products_trend: str = Field(..., regex="^(up|down|stable)$")
-    engagement_trend: str = Field(..., regex="^(up|down|stable)$")
+    products_trend: str = Field(..., pattern="^(up|down|stable)$")
+    engagement_trend: str = Field(..., pattern="^(up|down|stable)$")
     recommendation: str
 
 class ComparisonResponse(BaseModel):

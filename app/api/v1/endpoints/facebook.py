@@ -924,7 +924,7 @@ async def get_live_analytics(
 @router.post("/comments/bulk-process")
 async def bulk_process_comments(
     comment_ids: List[str],
-    action: str = Query(..., regex="^(mark_read|reply_all|export|categorize)$"),
+    action: str = Query(..., pattern="^(mark_read|reply_all|export|categorize)$"),
     current_seller = Depends(get_current_seller),
     db: Session = Depends(get_db)
 ):
@@ -992,7 +992,7 @@ async def bulk_process_comments(
 
 @router.get("/export/comments")
 async def export_comments(
-    format: str = Query("json", regex="^(json|csv)$"),
+    format: str = Query("json", pattern="^(json|csv)$"),
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
     current_seller = Depends(get_current_seller),
