@@ -1,0 +1,10 @@
+{
+  "date": "2025-12-03T12:11:17.537104",
+  "total_tests": 15,
+  "precision_api": 0.0,
+  "precision_local": 100.0,
+  "amelioration_potentielle": "80%+",
+  "recommandation": "Implémenter GeocodingServiceMadagascar",
+  "delai_recommandé": "48 heures",
+  "responsable": "Jean Raymond"
+}

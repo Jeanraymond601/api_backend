@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
+
+# Logs
+app.log
+*.log
+logs/
+*.pid
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.session.vim
+
+# System
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Test
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Database
+*.db
+*.sqlite3
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Temp
+temp/
+tmp/
+*.tmp
+*.temp
+
+# Supabase local
+supabase/
+"live-commerce-api.tar" 
+"*.tar" 
+"*.zip" 

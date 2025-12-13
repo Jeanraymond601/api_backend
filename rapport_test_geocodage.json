@@ -1,0 +1,165 @@
+{
+  "timestamp": "2025-12-03T13:00:49.857085",
+  "server_url": "http://localhost:8000",
+  "tests_performed": {
+    "geocoding_accuracy": {
+      "total": 15,
+      "successful": 15,
+      "failed": 0,
+      "success_rate": "100.0%"
+    },
+    "drivers_created": 15,
+    "endpoints_tested": [
+      "GET /api/v1/drivers/test",
+      "POST /api/v1/drivers/",
+      "GET /api/v1/drivers/",
+      "GET /api/v1/drivers/{id}",
+      "PUT /api/v1/drivers/{id}",
+      "GET /api/v1/drivers/stats/summary",
+      "GET /api/v1/drivers/zones/available",
+      "POST /api/v1/drivers/{id}/update-geolocation",
+      "PATCH /api/v1/drivers/{id}/activate",
+      "PATCH /api/v1/drivers/{id}/suspend"
+    ]
+  },
+  "geocoding_results": [
+    {
+      "name": "Rasoa Randria",
+      "address": "Lot IVG 87, Andranomena, Antananarivo 102",
+      "expected_zone": "Antananarivo",
+      "actual_zone": "Antananarivo Avaradrano",
+      "correct": true,
+      "driver_id": "c596934f-d23d-4694-8ba0-4586feca066f"
+    },
+    {
+      "name": "Jean Rakoto",
+      "address": "Avenue de l'Indépendance, Analakely, Tana 101",
+      "expected_zone": "Antananarivo",
+      "actual_zone": "Antananarivo Centre",
+      "correct": true,
+      "driver_id": "77f4f12e-7cf7-4184-b5fe-9cc1e3da91ab"
+    },
+    {
+      "name": "Marie Ravao",
+      "address": "Port de Toamasina, Rue Commerce, Toamasina 501",
+      "expected_zone": "Toamasina",
+      "actual_zone": "Toamasina I",
+      "correct": true,
+      "driver_id": "5d89a81f-470e-4cd0-bce2-f879c2a4ae83"
+    },
+    {
+      "name": "Pierre Andria",
+      "address": "Boulevard de la Mer, Mahajanga 401",
+      "expected_zone": "Mahajanga",
+      "actual_zone": "Mahajanga I",
+      "correct": true,
+      "driver_id": "cf167804-8427-49b0-8474-29787e68decd"
+    },
+    {
+      "name": "Luc Rasolo",
+      "address": "Avenue de France, Toliara 601",
+      "expected_zone": "Toliara",
+      "actual_zone": "Toliara I",
+      "correct": true,
+      "driver_id": "8b015d5b-450b-4464-8e8c-03fbd388ec6f"
+    },
+    {
+      "name": "Sophie Rajaona",
+      "address": "Rue du 26 Juin, Antsirabe 110",
+      "expected_zone": "Antsirabe",
+      "actual_zone": "Antsirabe",
+      "correct": true,
+      "driver_id": "be7f4871-9080-4e97-b6f7-168f019f9cf0"
+    },
+    {
+      "name": "Paul Rakotobe",
+      "address": "Bd de la Victoire, Antsiranana 201",
+      "expected_zone": "Antsiranana",
+      "actual_zone": "Antsiranana I",
+      "correct": true,
+      "driver_id": "8ff5137b-9b6e-4e01-8413-c5feda87f15d"
+    },
+    {
+      "name": "Nirina Andriana",
+      "address": "Allée des Baobabs, Morondava 619",
+      "expected_zone": "Morondava",
+      "actual_zone": "Morondava",
+      "correct": true,
+      "driver_id": "73593201-70f2-4dda-9fc4-468807ab38c6"
+    },
+    {
+      "name": "Tiana Rasoanaivo",
+      "address": "Rue Principale, Sainte-Marie 514",
+      "expected_zone": "Sainte-Marie",
+      "actual_zone": "Sainte-Marie",
+      "correct": true,
+      "driver_id": "8f83ea12-dee9-4f76-a77e-d75486d9a6ba"
+    },
+    {
+      "name": "Hery Andrianarisoa",
+      "address": "Avenue de l'Artisanat, Ambositra 306",
+      "expected_zone": "Ambositra",
+      "actual_zone": "Ambositra",
+      "correct": true,
+      "driver_id": "c6559624-d65b-4bf6-9bd6-ac5e690d6136"
+    },
+    {
+      "name": "Lalao Ratsimba",
+      "address": "Quartier Isotry, Antananarivo",
+      "expected_zone": "Antananarivo",
+      "actual_zone": "Antananarivo - Isotry",
+      "correct": true,
+      "driver_id": "7b2301e1-efaa-4154-9485-4baa82641b79"
+    },
+    {
+      "name": "Robert Andriamalala",
+      "address": "Lotissement Amboniloha, Antananarivo",
+      "expected_zone": "Antananarivo",
+      "actual_zone": "Antananarivo - Lotissement Amboniloha",
+      "correct": true,
+      "driver_id": "5a80a1ec-be00-4ea7-86ec-7959ffa9f79e"
+    },
+    {
+      "name": "Niry Razafy",
+      "address": "Commune rurale d'Andasibe, Moramanga",
+      "expected_zone": "Moramanga",
+      "actual_zone": "Moramanga",
+      "correct": true,
+      "driver_id": "1ff0e629-e84c-4c84-badf-2738eb885eda"
+    },
+    {
+      "name": "Tahina Rakotondraibe",
+      "address": "RN7, Ambatolampy",
+      "expected_zone": "Ambatolampy",
+      "actual_zone": "Ambatolampy",
+      "correct": true,
+      "driver_id": "fbab8819-180e-4030-9778-917a811fc330"
+    },
+    {
+      "name": "Zo Rabearivelo",
+      "address": "Zone industrielle Ivato, Antananarivo",
+      "expected_zone": "Antananarivo",
+      "actual_zone": "Antananarivo",
+      "correct": true,
+      "driver_id": "06810096-bf8e-4a75-85eb-3624c9e9095b"
+    }
+  ],
+  "created_drivers": [
+    "c596934f-d23d-4694-8ba0-4586feca066f",
+    "77f4f12e-7cf7-4184-b5fe-9cc1e3da91ab",
+    "5d89a81f-470e-4cd0-bce2-f879c2a4ae83",
+    "cf167804-8427-49b0-8474-29787e68decd",
+    "8b015d5b-450b-4464-8e8c-03fbd388ec6f",
+    "be7f4871-9080-4e97-b6f7-168f019f9cf0",
+    "8ff5137b-9b6e-4e01-8413-c5feda87f15d",
+    "73593201-70f2-4dda-9fc4-468807ab38c6",
+    "8f83ea12-dee9-4f76-a77e-d75486d9a6ba",
+    "c6559624-d65b-4bf6-9bd6-ac5e690d6136",
+    "7b2301e1-efaa-4154-9485-4baa82641b79",
+    "5a80a1ec-be00-4ea7-86ec-7959ffa9f79e",
+    "1ff0e629-e84c-4c84-badf-2738eb885eda",
+    "fbab8819-180e-4030-9778-917a811fc330",
+    "06810096-bf8e-4a75-85eb-3624c9e9095b"
+  ],
+  "recommendations": []
+}

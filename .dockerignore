@@ -1,0 +1,25 @@
+# .dockerignore
+.env
+*.env*
+.git
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv
+*.log
+*.sqlite3
+*.db
+instance/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+docker-compose.yml
+docker-compose.*.yml
+.docker/
