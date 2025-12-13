@@ -95,12 +95,12 @@ class NotificationSettings(BaseModel):
     quiet_hours_enabled: bool = Field(False, description="Activer les heures silencieuses")
     quiet_hours_start: Optional[str] = Field(
         None, 
-        regex="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$",
+        pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$",
         description="Heure de début (HH:MM)"
     )
     quiet_hours_end: Optional[str] = Field(
         None,
-        regex="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$",
+        pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$",
         description="Heure de fin (HH:MM)"
     )
     
@@ -119,7 +119,7 @@ class NotificationMeta(BaseModel):
     source: str = Field(..., description="Source de la notification")
     entity_id: Optional[int] = None
     entity_type: Optional[str] = None
-    priority: str = Field("normal", regex="^(low|normal|high|urgent)$")
+    priority: str = Field("normal", pattern="^(low|normal|high|urgent)$")
     actions: List[Dict[str, Any]] = Field(default_factory=list)
 
 # Schéma pour les réponses d'action

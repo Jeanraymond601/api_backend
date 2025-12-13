@@ -152,7 +152,7 @@ async def get_facebook_analytics(
 @router.get("/products/performance", response_model=List[ProductPerformanceResponse])
 async def get_product_performance(
     limit: int = Query(20, ge=1, le=100),
-    sort_by: str = Query("stock", regex="^(stock|price|created|views)$"),
+    sort_by: str = Query("stock", pattern="^(stock|price|created|views)$"),
     current_seller = Depends(get_current_seller),
     db: Session = Depends(get_db)
 ):

@@ -170,7 +170,7 @@ async def generate_report(
 @router.get("/export")
 async def export_report(
     format: ExportFormat = Query(ExportFormat.JSON),
-    report_type: str = Query("products", regex="^(products|facebook|sales|all)$"),
+    report_type: str = Query("products", pattern="^(products|facebook|sales|all)$"),
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
     current_seller = Depends(get_current_seller),

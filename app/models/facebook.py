@@ -304,3 +304,21 @@ class FacebookWebhookSubscription(Base):
     seller_id = Column(UUID(as_uuid=True), ForeignKey("sellers.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+# ⭐ AJOUT: Modèle pour les templates de messages
+class FacebookMessageTemplate(Base):
+    __tablename__ = "message_templates"
+
+    # ID
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    
+    # Template Info
+    template_type = Column(String(50), unique=True, nullable=False)
+    content = Column(Text, nullable=False)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    def __repr__(self):
+        return f"<FacebookMessageTemplate(type='{self.template_type}')>"

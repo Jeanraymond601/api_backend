@@ -26,11 +26,12 @@ from app.schemas.facebook import (
     SelectPageRequest,
     SelectPageResponse,
     SyncRequest,
-    CommentResponse,
+    
+    FacebookCommentResponse as CommentResponse,      # Alias local
     MessageResponse,
-    LiveVideoResponse,
-    PostResponse,
-    WebhookSubscriptionRequest
+    FacebookLiveVideoResponse as LiveVideoResponse,  # Alias local  
+    FacebookPostResponse as PostResponse,            # Alias local
+    WebhookSubscriptionRequest,
 )
 from app.models.facebook import (
     FacebookComment, FacebookLiveVideo, FacebookMessage, 
@@ -48,7 +49,8 @@ logger = logging.getLogger(__name__)
 facebook_webhook_service = FacebookWebhookService()
 facebook_graph_service = FacebookGraphAPIService()
 nlp_service = NLPService()
-
+CommentResponse = CommentResponse
+MessageResponse = MessageResponse
 # ==================== AUTHENTICATION & CONNECTION ====================
 
 @router.get("/login", response_model=FacebookConnectResponse)
