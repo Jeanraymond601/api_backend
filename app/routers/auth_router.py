@@ -286,6 +286,139 @@ def login_user(login_data: LoginSchema, db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur technique lors de l'authentification"
         )
+        
+        
+@router.get("/me")
+async def get_current_user_info(
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Endpoint pour récupérer les infos de l'utilisateur connecté
+    """
+    try:
+        print(f"🔍 Tentative récupération infos utilisateur")
+        
+        # Vérifier le header Authorization
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token manquant ou invalide",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        
+        # Extraire le token
+        token = authorization.split(" ")[1] if len(authorization.split(" ")) > 1 else ""
+        
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token manquant"
+            )
+        
+        # Décoder le token
+        try:
+            payload = security_manager.verify_jwt_token(token)
+        except Exception as token_error:
+            print(f"❌ Erreur décodage token: {token_error}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token invalide ou expiré"
+            )
+        
+        # Extraire les infos du payload
+        user_id = payload.get("user_id")
+        email = payload.get("email")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token invalide: user_id manquant"
+            )
+        
+        print(f"✅ Token valide pour user_id: {user_id}, email: {email}")
+        
+        # Récupérer l'utilisateur depuis la base
+        user_query = text("""
+            SELECT 
+                id, email, full_name, telephone, role, adresse, 
+                is_active, created_at, updated_at
+            FROM users 
+            WHERE id = :user_id
+        """)
+        
+        result = db.execute(user_query, {"user_id": uuid.UUID(user_id)})
+        user_row = result.fetchone()
+        
+        if not user_row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Utilisateur non trouvé"
+            )
+        
+        # Convertir en dict
+        user_dict = {
+            'id': user_row[0],
+            'email': user_row[1],
+            'full_name': user_row[2],
+            'telephone': user_row[3],
+            'role': user_row[4],
+            'adresse': user_row[5],
+            'is_active': user_row[6],
+            'created_at': user_row[7],
+            'updated_at': user_row[8]
+        }
+        
+        # Chercher seller_id si c'est un vendeur
+        seller_info = None
+        if user_dict['role'].lower() in ["vendeur", "seller", "vendor"]:
+            seller_query = text("""
+                SELECT id, company_name, abonnement_status
+                FROM sellers 
+                WHERE user_id = :user_id
+            """)
+            seller_result = db.execute(seller_query, {"user_id": user_dict['id']})
+            seller_row = seller_result.fetchone()
+            
+            if seller_row:
+                seller_info = {
+                    "seller_id": str(seller_row[0]),
+                    "company_name": seller_row[1],
+                    "abonnement_status": seller_row[2]
+                }
+                print(f"✅ Seller trouvé: {seller_info['company_name']}")
+        
+        # Construire la réponse
+        response_data = {
+            "user_id": str(user_dict['id']),
+            "email": user_dict['email'],
+            "role": user_dict['role'].upper(),
+            "full_name": user_dict['full_name'] or "",
+            "telephone": user_dict['telephone'] or "",
+            "adresse": user_dict['adresse'] or "",
+            "is_active": user_dict['is_active']
+        }
+        
+        # Ajouter seller_info si disponible
+        if seller_info:
+            response_data["seller_id"] = seller_info.get("seller_id")
+            response_data["company_name"] = seller_info.get("company_name", "")
+            response_data["abonnement_status"] = seller_info.get("abonnement_status", "actif")
+        
+        print(f"✅ Infos utilisateur récupérées: {user_dict['email']}")
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erreur get_current_user_info: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur technique: {str(e)}"
+        )
 
 # ================================
 # GESTION MOT DE PASSE

@@ -11,6 +11,8 @@ import hashlib
 import hmac
 from uuid import UUID
 import asyncio
+import csv
+from io import StringIO
 
 from app.db import get_db
 from app.services.facebook_auth import facebook_auth_service
@@ -26,11 +28,10 @@ from app.schemas.facebook import (
     SelectPageRequest,
     SelectPageResponse,
     SyncRequest,
-    
-    FacebookCommentResponse as CommentResponse,      # Alias local
+    FacebookCommentResponse as CommentResponse,
     MessageResponse,
-    FacebookLiveVideoResponse as LiveVideoResponse,  # Alias local  
-    FacebookPostResponse as PostResponse,            # Alias local
+    FacebookLiveVideoResponse as LiveVideoResponse,
+    FacebookPostResponse as PostResponse,
     WebhookSubscriptionRequest,
 )
 from app.models.facebook import (
@@ -38,7 +39,7 @@ from app.models.facebook import (
     FacebookPost, FacebookUser, FacebookPage, FacebookWebhookLog,
     FacebookMessageTemplate, FacebookWebhookSubscription
 )
-from app.core.security import get_current_seller
+from app.core.security import get_current_seller, get_current_user
 from app.core.config import settings
 from app.services.nlp_service import NLPService
 
@@ -49,8 +50,7 @@ logger = logging.getLogger(__name__)
 facebook_webhook_service = FacebookWebhookService()
 facebook_graph_service = FacebookGraphAPIService()
 nlp_service = NLPService()
-CommentResponse = CommentResponse
-MessageResponse = MessageResponse
+
 # ==================== AUTHENTICATION & CONNECTION ====================
 
 @router.get("/login", response_model=FacebookConnectResponse)
@@ -88,7 +88,7 @@ async def facebook_login(
             "business_management"     # Pour la gestion business
         ]
         
-        auth_url = facebook_auth_service.get_oauth_url(state, permissions)
+        auth_url = facebook_auth_service.get_oauth_url(state)
         
         return FacebookConnectResponse(
             success=True,
@@ -105,7 +105,153 @@ async def facebook_login(
             detail="Erreur lors de la connexion à Facebook"
         )
 
-# [Les autres endpoints d'authentification restent similaires...]
+@router.get("/callback", response_model=FacebookAuthResponse)
+async def facebook_callback(
+    request: Request,
+    code: str = Query(...),
+    state: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Callback OAuth Facebook
+    """
+    try:
+        # Échanger le code contre un token d'accès
+        token_data = await facebook_auth_service.exchange_code_for_token(code)
+        
+        # Récupérer les infos utilisateur Facebook
+        user_info = await facebook_auth_service.get_user_info(token_data["access_token"])
+        
+        # Récupérer les pages de l'utilisateur
+        pages = await facebook_auth_service.get_user_pages(token_data["access_token"])
+        
+        # Sauvegarder en base
+        facebook_user = FacebookUser(
+            facebook_id=user_info["id"],
+            name=user_info.get("name"),
+            email=user_info.get("email"),
+            access_token=token_data["access_token"],
+            token_expires_at=datetime.fromtimestamp(token_data.get("expires_in", 0) + datetime.now().timestamp()),
+            seller_id=UUID(state),  # state contient le seller_id
+            is_active=True
+        )
+        db.add(facebook_user)
+        db.flush()
+        
+        # Sauvegarder les pages
+        for page in pages:
+            fb_page = FacebookPage(
+                page_id=page["id"],
+                name=page.get("name"),
+                category=page.get("category"),
+                page_access_token=page.get("access_token"),
+                token_expires_at=datetime.fromtimestamp(page.get("expires_in", 0) + datetime.now().timestamp()),
+                facebook_user_id=facebook_user.id,
+                seller_id=UUID(state),
+                is_selected=False
+            )
+            db.add(fb_page)
+        
+        db.commit()
+        
+        return FacebookAuthResponse(
+            success=True,
+            message="Connexion Facebook réussie",
+            user=user_info,
+            pages=pages
+        )
+        
+    except Exception as e:
+        logger.error(f"Erreur callback Facebook: {e}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la connexion: {str(e)}"
+        )
+
+# ==================== PAGES MANAGEMENT ====================
+
+@router.get("/pages", response_model=List[FacebookPageResponse])
+async def get_facebook_pages(
+    current_seller = Depends(get_current_seller),
+    db: Session = Depends(get_db)
+):
+    """
+    Récupère toutes les pages Facebook du vendeur
+    """
+    try:
+        pages = db.query(FacebookPage).filter(
+            FacebookPage.seller_id == current_seller.id
+        ).all()
+        
+        return [
+            FacebookPageResponse(
+                id=str(page.id),
+                page_id=page.page_id,
+                name=page.name,
+                category=page.category,
+                fan_count=page.fan_count,
+                is_selected=page.is_selected,
+                cover_photo_url=page.cover_photo_url,
+                profile_pic_url=page.profile_pic_url,
+                created_at=page.created_at.isoformat() if page.created_at else None
+            )
+            for page in pages
+        ]
+        
+    except Exception as e:
+        logger.error(f"Erreur récupération pages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/pages/select", response_model=SelectPageResponse)
+async def select_facebook_page(
+    request: SelectPageRequest,
+    current_seller = Depends(get_current_seller),
+    db: Session = Depends(get_db)
+):
+    """
+    Sélectionne une page Facebook comme page active
+    """
+    try:
+        # Désélectionner toutes les pages du vendeur
+        db.query(FacebookPage).filter(
+            FacebookPage.seller_id == current_seller.id
+        ).update({"is_selected": False})
+        
+        # Sélectionner la page spécifiée
+        page = db.query(FacebookPage).filter(
+            FacebookPage.page_id == request.page_id,
+            FacebookPage.seller_id == current_seller.id
+        ).first()
+        
+        if not page:
+            raise HTTPException(status_code=404, detail="Page non trouvée")
+        
+        page.is_selected = True
+        page.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return SelectPageResponse(
+            success=True,
+            message=f"Page {page.name} sélectionnée avec succès",
+            page=FacebookPageResponse(
+                id=str(page.id),
+                page_id=page.page_id,
+                name=page.name,
+                category=page.category,
+                fan_count=page.fan_count,
+                is_selected=True,
+                cover_photo_url=page.cover_photo_url,
+                profile_pic_url=page.profile_pic_url
+            )
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erreur sélection page: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== WEBHOOK MANAGEMENT ====================
 
@@ -130,14 +276,14 @@ async def subscribe_to_webhooks(
         
         # Vérifier si déjà souscrit
         existing_sub = db.query(FacebookWebhookSubscription).filter(
-            FacebookWebhookSubscription.page_id == page.id
+            FacebookWebhookSubscription.page_id == page.page_id
         ).first()
         
         if existing_sub and not request.force_resubscribe:
             return {
                 "success": True,
                 "message": "Déjà souscrit aux webhooks",
-                "subscription_id": existing_sub.id
+                "subscription_id": str(existing_sub.id)
             }
         
         # Souscrire aux webhooks via Graph API
@@ -188,14 +334,16 @@ async def subscribe_to_webhooks(
                 subscription.webhook_url = webhook_url
                 subscription.is_active = True
                 subscription.last_sync = datetime.utcnow()
+                subscription.updated_at = datetime.utcnow()
             else:
                 subscription = FacebookWebhookSubscription(
-                    page_id=page.id,
+                    page_id=page.page_id,
                     subscription_id=result.get("id"),
                     subscribed_fields=json.dumps(subscription_fields),
                     webhook_url=webhook_url,
                     is_active=True,
-                    last_sync=datetime.utcnow()
+                    last_sync=datetime.utcnow(),
+                    seller_id=current_seller.id
                 )
                 db.add(subscription)
             
@@ -204,13 +352,14 @@ async def subscribe_to_webhooks(
             return {
                 "success": True,
                 "message": "Webhooks souscrits avec succès",
-                "subscription_id": subscription.id,
+                "subscription_id": str(subscription.id),
                 "fields": subscription_fields,
                 "webhook_url": webhook_url
             }
             
     except Exception as e:
         logger.error(f"Erreur subscription webhook: {e}", exc_info=True)
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/webhook")
@@ -253,7 +402,7 @@ async def facebook_webhook_receive(
             entry_id=body_json.get("entry", [{}])[0].get("id") if body_json.get("entry") else None,
             payload=body_json,
             signature=signature,
-            received_at=datetime.utcnow()
+            created_at=datetime.utcnow()
         )
         db.add(webhook_log)
         db.commit()
@@ -273,11 +422,11 @@ async def facebook_webhook_receive(
         logger.error(f"❌ Erreur webhook: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-async def process_webhook_async(webhook_log_id: int, body_json: dict, db: Session):
+async def process_webhook_async(webhook_log_id: UUID, body_json: dict, db: Session):
     """Traite le webhook de manière asynchrone"""
     try:
         # Récupérer le log
-        webhook_log = db.query(FacebookWebhookLog).get(webhook_log_id)
+        webhook_log = db.query(FacebookWebhookLog).filter(FacebookWebhookLog.id == webhook_log_id).first()
         if not webhook_log:
             logger.error(f"Log webhook {webhook_log_id} non trouvé")
             return
@@ -458,6 +607,15 @@ async def process_messaging_event(event: dict, page: FacebookPage, db: Session):
     elif "read" in event:
         watermark = event["read"].get("watermark")
         # Marquer les messages comme lus
+        messages = db.query(FacebookMessage).filter(
+            FacebookMessage.sender_id == sender,
+            FacebookMessage.page_id == page.page_id,
+            FacebookMessage.created_at <= datetime.fromtimestamp(watermark/1000)
+        ).all()
+        
+        for msg in messages:
+            msg.status = "read"
+        db.commit()
 
 async def process_live_videos_change(value: dict, page: FacebookPage, db: Session):
     """Traite les changements de lives vidéos"""
@@ -659,13 +817,13 @@ async def webhook_stream(
                 
                 # Formater l'événement pour le SSE
                 event_data = {
-                    "id": event.id,
+                    "id": str(event.id),
                     "type": event.event_type,
                     "object": event.object_type,
                     "timestamp": event.processed_at.isoformat() if event.processed_at else None,
                     "data": {
                         "entry_id": event.entry_id,
-                        "seller_id": current_seller.id
+                        "seller_id": str(current_seller.id)
                     }
                 }
                 
@@ -692,44 +850,82 @@ async def get_recent_notifications(
     """
     Récupère les notifications récentes
     """
-    # Récupérer les pages du vendeur
-    pages = db.query(FacebookPage).filter(
-        FacebookPage.seller_id == current_seller.id
-    ).all()
-    
-    page_ids = [page.id for page in pages]
-    
-    # Commentaires récents
-    recent_comments = db.query(FacebookComment).filter(
-        FacebookComment.page_id.in_(page_ids),
-        FacebookComment.status == "new"
-    ).order_by(FacebookComment.created_at.desc()).limit(limit).all()
-    
-    # Messages récents
-    recent_messages = db.query(FacebookMessage).filter(
-        FacebookMessage.page_id.in_([p.page_id for p in pages]),
-        FacebookMessage.direction == "incoming",
-        FacebookMessage.status == "received"
-    ).order_by(FacebookMessage.created_at.desc()).limit(limit).all()
-    
-    # Lives actifs
-    active_lives = db.query(FacebookLiveVideo).filter(
-        FacebookLiveVideo.page_id.in_([p.page_id for p in pages]),
-        FacebookLiveVideo.status == "live"
-    ).order_by(FacebookLiveVideo.actual_start_time.desc()).all()
-    
-    return {
-        "success": True,
-        "timestamp": datetime.utcnow().isoformat(),
-        "counts": {
-            "new_comments": len(recent_comments),
-            "new_messages": len(recent_messages),
-            "active_lives": len(active_lives)
-        },
-        "comments": recent_comments,
-        "messages": recent_messages,
-        "lives": active_lives
-    }
+    try:
+        # Récupérer les pages du vendeur
+        pages = db.query(FacebookPage).filter(
+            FacebookPage.seller_id == current_seller.id
+        ).all()
+        
+        page_ids = [page.id for page in pages]
+        page_fb_ids = [page.page_id for page in pages]
+        
+        # Commentaires récents
+        recent_comments = db.query(FacebookComment).filter(
+            FacebookComment.page_id.in_(page_ids),
+            FacebookComment.status == "new"
+        ).order_by(FacebookComment.created_at.desc()).limit(limit).all()
+        
+        # Messages récents
+        recent_messages = db.query(FacebookMessage).filter(
+            FacebookMessage.page_id.in_(page_fb_ids),
+            FacebookMessage.direction == "incoming",
+            FacebookMessage.status == "received"
+        ).order_by(FacebookMessage.created_at.desc()).limit(limit).all()
+        
+        # Lives actifs
+        active_lives = db.query(FacebookLiveVideo).filter(
+            FacebookLiveVideo.page_id.in_(page_fb_ids),
+            FacebookLiveVideo.status == "live"
+        ).order_by(FacebookLiveVideo.actual_start_time.desc()).all()
+        
+        return {
+            "success": True,
+            "timestamp": datetime.utcnow().isoformat(),
+            "counts": {
+                "new_comments": len(recent_comments),
+                "new_messages": len(recent_messages),
+                "active_lives": len(active_lives)
+            },
+            "comments": [
+                {
+                    "id": comment.id,
+                    "message": comment.message,
+                    "user_name": comment.user_name,
+                    "post_id": comment.post_id,
+                    "status": comment.status,
+                    "intent": comment.intent,
+                    "sentiment": comment.sentiment,
+                    "created_at": comment.created_at.isoformat() if comment.created_at else None
+                }
+                for comment in recent_comments
+            ],
+            "messages": [
+                {
+                    "message_id": msg.message_id,
+                    "content": msg.content,
+                    "sender_id": msg.sender_id,
+                    "page_id": msg.page_id,
+                    "intent": msg.intent,
+                    "sentiment": msg.sentiment,
+                    "created_at": msg.created_at.isoformat() if msg.created_at else None
+                }
+                for msg in recent_messages
+            ],
+            "lives": [
+                {
+                    "video_id": live.facebook_video_id,
+                    "title": live.title,
+                    "status": live.status,
+                    "live_views": live.live_views,
+                    "actual_start_time": live.actual_start_time.isoformat() if live.actual_start_time else None
+                }
+                for live in active_lives
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération notifications: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== MESSAGE MANAGEMENT ====================
 
@@ -765,11 +961,16 @@ async def reply_to_message(
         if not page:
             raise HTTPException(status_code=404, detail="Page non trouvée")
         
+        # Vérifier le texte de réponse
+        reply_text = reply_data.get("text", "").strip()
+        if not reply_text:
+            raise HTTPException(status_code=400, detail="Le texte de réponse ne peut pas être vide")
+        
         # Envoyer la réponse via Graph API
         response = await facebook_graph_service.send_message(
             page_id=page.page_id,
             recipient_id=message.sender_id,
-            message_text=reply_data.get("text"),
+            message_text=reply_text,
             access_token=page.page_access_token
         )
         
@@ -781,17 +982,17 @@ async def reply_to_message(
                 recipient_id=message.sender_id,
                 page_id=page.page_id,
                 message_type="text",
-                content=reply_data.get("text"),
+                content=reply_text,
                 direction="outgoing",
                 status="sent",
                 parent_message_id=message_id
             )
             db.add(reply_message)
-            db.commit()
             
             # Marquer le message original comme répondu
             message.status = "replied"
             message.replied_at = datetime.utcnow()
+            
             db.commit()
             
             return {
@@ -806,6 +1007,8 @@ async def reply_to_message(
                 detail=f"Erreur Facebook: {response.get('error', 'Unknown')}"
             )
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Erreur reply message: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -828,17 +1031,18 @@ async def handle_auto_reply(message: FacebookMessage, page: FacebookPage, db: Se
     
     if template:
         # Envoyer la réponse automatique
-        await facebook_graph_service.send_message(
+        response = await facebook_graph_service.send_message(
             page_id=page.page_id,
             recipient_id=message.sender_id,
             message_text=template.response_text,
             access_token=page.page_access_token
         )
         
-        # Marquer comme répondu automatiquement
-        message.status = "auto_replied"
-        message.auto_reply_template_id = template.id
-        db.commit()
+        if response.get("message_id"):
+            # Marquer comme répondu automatiquement
+            message.status = "auto_replied"
+            message.auto_reply_template_id = template.id
+            db.commit()
 
 # ==================== LIVE COMMERCE MANAGEMENT ====================
 
@@ -851,73 +1055,81 @@ async def get_live_analytics(
     """
     Récupère les analytics d'un live
     """
-    live = db.query(FacebookLiveVideo).filter(
-        FacebookLiveVideo.facebook_video_id == live_id,
-        FacebookLiveVideo.seller_id == current_seller.id
-    ).first()
-    
-    if not live:
-        raise HTTPException(status_code=404, detail="Live non trouvé")
-    
-    # Récupérer les commentaires du live
-    comments = db.query(FacebookComment).filter(
-        FacebookComment.post_id == live_id,
-        FacebookComment.seller_id == current_seller.id
-    ).all()
-    
-    # Analyser les commentaires
-    comment_analysis = {
-        "total": len(comments),
-        "by_intent": {},
-        "by_sentiment": {},
-        "top_keywords": []
-    }
-    
-    for comment in comments:
-        # Compter par intention
-        intent = comment.intent or "unknown"
-        comment_analysis["by_intent"][intent] = comment_analysis["by_intent"].get(intent, 0) + 1
+    try:
+        live = db.query(FacebookLiveVideo).filter(
+            FacebookLiveVideo.facebook_video_id == live_id,
+            FacebookLiveVideo.seller_id == current_seller.id
+        ).first()
         
-        # Compter par sentiment
-        sentiment = comment.sentiment or "neutral"
-        comment_analysis["by_sentiment"][sentiment] = comment_analysis["by_sentiment"].get(sentiment, 0) + 1
-    
-    # Récupérer les metrics du live depuis Facebook
-    async with httpx.AsyncClient() as client:
-        # Récupérer la page pour le token
+        if not live:
+            raise HTTPException(status_code=404, detail="Live non trouvé")
+        
+        # Récupérer les commentaires du live
+        comments = db.query(FacebookComment).filter(
+            FacebookComment.post_id == live_id,
+            FacebookComment.seller_id == current_seller.id
+        ).all()
+        
+        # Analyser les commentaires
+        comment_analysis = {
+            "total": len(comments),
+            "by_intent": {},
+            "by_sentiment": {},
+            "top_keywords": []
+        }
+        
+        for comment in comments:
+            # Compter par intention
+            intent = comment.intent or "unknown"
+            comment_analysis["by_intent"][intent] = comment_analysis["by_intent"].get(intent, 0) + 1
+            
+            # Compter par sentiment
+            sentiment = comment.sentiment or "neutral"
+            comment_analysis["by_sentiment"][sentiment] = comment_analysis["by_sentiment"].get(sentiment, 0) + 1
+        
+        # Récupérer les metrics du live depuis Facebook
+        facebook_metrics = []
         page = db.query(FacebookPage).filter(
             FacebookPage.page_id == live.page_id
         ).first()
         
-        if page:
-            response = await client.get(
-                f"https://graph.facebook.com/v18.0/{live_id}/video_insights",
-                params={
-                    "metric": "total_video_views,total_video_complete_views,"
-                             "total_video_retention_graph,"
-                             "total_video_avg_time_watched,"
-                             "total_video_impressions,"
-                             "total_video_engagement",
-                    "access_token": page.page_access_token
-                }
-            )
-            
-            facebook_metrics = response.json().get("data", []) if response.status_code == 200 else []
-    
-    return {
-        "success": True,
-        "live_id": live_id,
-        "live_title": live.title,
-        "status": live.status,
-        "duration": live.duration,
-        "start_time": live.actual_start_time.isoformat() if live.actual_start_time else None,
-        "end_time": live.end_time.isoformat() if live.end_time else None,
-        "analytics": {
-            "comments": comment_analysis,
-            "facebook_metrics": facebook_metrics,
-            "engagement_rate": len(comments) / max(live.live_views or 1, 1) * 100
+        if page and page.page_access_token:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"https://graph.facebook.com/v18.0/{live_id}/video_insights",
+                    params={
+                        "metric": "total_video_views,total_video_complete_views,"
+                                 "total_video_retention_graph,"
+                                 "total_video_avg_time_watched,"
+                                 "total_video_impressions,"
+                                 "total_video_engagement",
+                        "access_token": page.page_access_token
+                    }
+                )
+                
+                if response.status_code == 200:
+                    facebook_metrics = response.json().get("data", [])
+        
+        return {
+            "success": True,
+            "live_id": live_id,
+            "live_title": live.title,
+            "status": live.status,
+            "duration": live.duration,
+            "start_time": live.actual_start_time.isoformat() if live.actual_start_time else None,
+            "end_time": live.end_time.isoformat() if live.end_time else None,
+            "analytics": {
+                "comments": comment_analysis,
+                "facebook_metrics": facebook_metrics,
+                "engagement_rate": (len(comments) / max(live.live_views or 1, 1)) * 100 if live.live_views else 0
+            }
         }
-    }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur analytics live: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== BULK OPERATIONS ====================
 
@@ -951,11 +1163,11 @@ async def bulk_process_comments(
             db.commit()
             
         elif action == "reply_all":
-            # Récupérer la page
+            # Récupérer la page (tous les commentaires doivent être de la même page)
             page_id = comments[0].page_id if comments else None
             page = db.query(FacebookPage).filter(FacebookPage.id == page_id).first()
             
-            if page:
+            if page and page.page_access_token:
                 # Template de réponse
                 reply_text = "Merci pour votre commentaire ! Nous reviendrons vers vous rapidement."
                 
@@ -972,10 +1184,23 @@ async def bulk_process_comments(
                             comment.status = "replied"
                             comment.replied_at = datetime.utcnow()
                             results.append({"id": comment.id, "reply_id": response["id"]})
+                        else:
+                            results.append({"id": comment.id, "error": "Erreur Facebook"})
                     except Exception as e:
                         results.append({"id": comment.id, "error": str(e)})
                 
                 db.commit()
+        
+        elif action == "categorize":
+            for comment in comments:
+                if comment.message:
+                    # Analyser avec NLP
+                    analysis = nlp_service.analyze_comment_intent(comment.message)
+                    comment.intent = analysis.get("intent")
+                    comment.sentiment = analysis.get("sentiment")
+                    results.append({"id": comment.id, "intent": comment.intent, "sentiment": comment.sentiment})
+            
+            db.commit()
         
         return {
             "success": True,
@@ -1001,61 +1226,76 @@ async def export_comments(
     """
     Exporte les commentaires
     """
-    query = db.query(FacebookComment).filter(
-        FacebookComment.seller_id == current_seller.id
-    )
-    
-    if start_date:
-        query = query.filter(FacebookComment.created_at >= start_date)
-    if end_date:
-        query = query.filter(FacebookComment.created_at <= end_date)
-    
-    comments = query.order_by(FacebookComment.created_at.desc()).all()
-    
-    if format == "json":
-        return {
-            "success": True,
-            "format": "json",
-            "count": len(comments),
-            "data": [comment.to_dict() for comment in comments]
-        }
-    elif format == "csv":
-        # Générer CSV
-        import csv
-        from io import StringIO
-        
-        output = StringIO()
-        writer = csv.writer(output)
-        
-        # En-têtes
-        writer.writerow([
-            "ID", "Message", "User", "Post ID", "Status",
-            "Intent", "Sentiment", "Created At", "Page"
-        ])
-        
-        # Données
-        for comment in comments:
-            writer.writerow([
-                comment.id,
-                comment.message,
-                comment.user_name,
-                comment.post_id or "",
-                comment.status,
-                comment.intent or "",
-                comment.sentiment or "",
-                comment.created_at.isoformat() if comment.created_at else "",
-                comment.page.name if comment.page else ""
-            ])
-        
-        output.seek(0)
-        
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={
-                "Content-Disposition": f"attachment; filename=comments_{datetime.utcnow().date()}.csv"
-            }
+    try:
+        query = db.query(FacebookComment).filter(
+            FacebookComment.seller_id == current_seller.id
         )
+        
+        if start_date:
+            query = query.filter(FacebookComment.created_at >= start_date)
+        if end_date:
+            query = query.filter(FacebookComment.created_at <= end_date)
+        
+        comments = query.order_by(FacebookComment.created_at.desc()).all()
+        
+        if format == "json":
+            return {
+                "success": True,
+                "format": "json",
+                "count": len(comments),
+                "data": [
+                    {
+                        "id": comment.id,
+                        "message": comment.message,
+                        "user_name": comment.user_name,
+                        "post_id": comment.post_id,
+                        "status": comment.status,
+                        "intent": comment.intent,
+                        "sentiment": comment.sentiment,
+                        "created_at": comment.created_at.isoformat() if comment.created_at else None,
+                        "facebook_created_time": comment.facebook_created_time.isoformat() if comment.facebook_created_time else None
+                    }
+                    for comment in comments
+                ]
+            }
+        elif format == "csv":
+            # Générer CSV
+            output = StringIO()
+            writer = csv.writer(output, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+            
+            # En-têtes
+            writer.writerow([
+                "ID", "Message", "User", "Post ID", "Status",
+                "Intent", "Sentiment", "Created At", "Facebook Created Time"
+            ])
+            
+            # Données
+            for comment in comments:
+                writer.writerow([
+                    comment.id,
+                    comment.message or "",
+                    comment.user_name or "",
+                    comment.post_id or "",
+                    comment.status or "",
+                    comment.intent or "",
+                    comment.sentiment or "",
+                    comment.created_at.isoformat() if comment.created_at else "",
+                    comment.facebook_created_time.isoformat() if comment.facebook_created_time else ""
+                ])
+            
+            output.seek(0)
+            
+            return StreamingResponse(
+                iter([output.getvalue()]),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=comments_export_{datetime.utcnow().date()}.csv"
+                }
+            )
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur export comments: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== HEALTH & MONITORING ====================
 
@@ -1067,66 +1307,214 @@ async def webhook_health(
     """
     Vérifie l'état des webhooks
     """
-    # Récupérer les subscriptions actives
-    pages = db.query(FacebookPage).filter(
-        FacebookPage.seller_id == current_seller.id,
-        FacebookPage.is_selected == True
-    ).all()
-    
-    subscriptions = []
-    for page in pages:
-        sub = db.query(FacebookWebhookSubscription).filter(
-            FacebookWebhookSubscription.page_id == page.id,
-            FacebookWebhookSubscription.is_active == True
+    try:
+        # Récupérer les pages sélectionnées du vendeur
+        pages = db.query(FacebookPage).filter(
+            FacebookPage.seller_id == current_seller.id,
+            FacebookPage.is_selected == True
+        ).all()
+        
+        subscriptions = []
+        for page in pages:
+            sub = db.query(FacebookWebhookSubscription).filter(
+                FacebookWebhookSubscription.page_id == page.page_id,
+                FacebookWebhookSubscription.is_active == True
+            ).first()
+            
+            if sub:
+                subscriptions.append({
+                    "page_id": page.page_id,
+                    "page_name": page.name,
+                    "subscription_id": sub.subscription_id,
+                    "last_sync": sub.last_sync.isoformat() if sub.last_sync else None,
+                    "fields": json.loads(sub.subscribed_fields) if sub.subscribed_fields else []
+                })
+        
+        # Derniers webhooks reçus - CORRECTION ICI: utiliser created_at au lieu de received_at
+        recent_webhooks = db.query(FacebookWebhookLog).order_by(
+            FacebookWebhookLog.created_at.desc()
+        ).limit(10).all()
+        
+        return {
+            "success": True,
+            "timestamp": datetime.utcnow().isoformat(),
+            "subscriptions": {
+                "count": len(subscriptions),
+                "active": subscriptions
+            },
+            "recent_webhooks": [
+                {
+                    "id": str(wh.id),
+                    "object": wh.object_type,
+                    "received_at": wh.created_at.isoformat() if wh.created_at else None,  # CORRECTION: created_at
+                    "processed": wh.processed
+                }
+                for wh in recent_webhooks
+            ],
+            "webhook_url": f"{settings.APP_URL}/api/v1/facebook/webhook" if settings.APP_URL else "Not configured"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur webhook health: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== ADDITIONAL ENDPOINTS ====================
+
+@router.get("/comments")
+async def get_comments(
+    page_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_seller = Depends(get_current_seller),
+    db: Session = Depends(get_db)
+):
+    """
+    Récupère les commentaires avec filtres
+    """
+    try:
+        query = db.query(FacebookComment).filter(
+            FacebookComment.seller_id == current_seller.id
+        )
+        
+        if page_id:
+            # Trouver l'ID interne de la page
+            page = db.query(FacebookPage).filter(
+                FacebookPage.page_id == page_id,
+                FacebookPage.seller_id == current_seller.id
+            ).first()
+            if page:
+                query = query.filter(FacebookComment.page_id == page.id)
+        
+        if status:
+            query = query.filter(FacebookComment.status == status)
+        
+        comments = query.order_by(FacebookComment.created_at.desc()).offset(offset).limit(limit).all()
+        
+        return {
+            "success": True,
+            "count": len(comments),
+            "total": query.count(),
+            "comments": [
+                {
+                    "id": comment.id,
+                    "message": comment.message,
+                    "user_name": comment.user_name,
+                    "post_id": comment.post_id,
+                    "status": comment.status,
+                    "intent": comment.intent,
+                    "sentiment": comment.sentiment,
+                    "created_at": comment.created_at.isoformat() if comment.created_at else None
+                }
+                for comment in comments
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération commentaires: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/disconnect")
+async def disconnect_facebook(
+    current_seller = Depends(get_current_seller),
+    db: Session = Depends(get_db)
+):
+    """
+    Déconnecte le vendeur de Facebook
+    """
+    try:
+        # Supprimer toutes les données Facebook du vendeur
+        facebook_user = db.query(FacebookUser).filter(
+            FacebookUser.seller_id == current_seller.id
         ).first()
         
-        if sub:
-            subscriptions.append({
-                "page_id": page.page_id,
-                "page_name": page.name,
-                "subscription_id": sub.subscription_id,
-                "last_sync": sub.last_sync.isoformat() if sub.last_sync else None,
-                "fields": json.loads(sub.subscribed_fields) if sub.subscribed_fields else []
-            })
-    
-    # Derniers webhooks reçus
-    recent_webhooks = db.query(FacebookWebhookLog).order_by(
-        FacebookWebhookLog.received_at.desc()
-    ).limit(10).all()
-    
-    return {
-        "success": True,
-        "timestamp": datetime.utcnow().isoformat(),
-        "subscriptions": {
-            "count": len(subscriptions),
-            "active": subscriptions
-        },
-        "recent_webhooks": [
-            {
-                "id": wh.id,
-                "object": wh.object_type,
-                "received_at": wh.received_at.isoformat() if wh.received_at else None,
-                "processed": wh.processed
+        if facebook_user:
+            # Supprimer les pages
+            db.query(FacebookPage).filter(
+                FacebookPage.facebook_user_id == facebook_user.id
+            ).delete()
+            
+            # Supprimer les subscriptions
+            db.query(FacebookWebhookSubscription).filter(
+                FacebookWebhookSubscription.seller_id == current_seller.id
+            ).delete()
+            
+            # Supprimer l'utilisateur Facebook
+            db.delete(facebook_user)
+            
+            db.commit()
+            
+            return {
+                "success": True,
+                "message": "Compte Facebook déconnecté avec succès"
             }
-            for wh in recent_webhooks
-        ],
-        "webhook_url": f"{settings.APP_URL}/api/v1/facebook/webhook"
-    }
+        else:
+            return {
+                "success": True,
+                "message": "Aucun compte Facebook connecté"
+            }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erreur déconnexion Facebook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== SYNC ENDPOINTS ====================
+
+@router.post("/sync")
+async def sync_facebook_data(
+    sync_request: SyncRequest,
+    current_seller = Depends(get_current_seller),
+    db: Session = Depends(get_db)
+):
+    """
+    Synchronise les données Facebook
+    """
+    try:
+        page = db.query(FacebookPage).filter(
+            FacebookPage.page_id == sync_request.page_id,
+            FacebookPage.seller_id == current_seller.id
+        ).first()
+        
+        if not page:
+            raise HTTPException(status_code=404, detail="Page non trouvée")
+        
+        results = {}
+        
+        if sync_request.sync_posts:
+            # Synchroniser les posts
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"https://graph.facebook.com/v18.0/{page.page_id}/posts",
+                    params={
+                        "fields": "id,message,created_time,updated_time,full_picture,permalink_url,likes.summary(true),comments.summary(true),shares,type",
+                        "access_token": page.page_access_token,
+                        "limit": 100
+                    }
+                )
+                
+                if response.status_code == 200:
+                    posts = response.json().get("data", [])
+                    results["posts"] = len(posts)
+        
+        return {
+            "success": True,
+            "message": "Synchronisation lancée",
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur synchronisation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== UTILITY FUNCTIONS ====================
 
 async def notify_real_time_comment(comment: FacebookComment, page: FacebookPage):
     """Notifie en temps réel un nouveau commentaire"""
-    # Ici, vous pouvez intégrer avec:
-    # - WebSockets
-    # - Server-Sent Events (SSE)
-    # - Webhooks externes
-    # - Notifications push
-    
     notification_data = {
         "type": "new_comment",
         "comment_id": comment.id,
-        "message": comment.message[:100],  # Premier 100 caractères
+        "message": comment.message[:100] if comment.message else "",
         "user": comment.user_name,
         "page": page.name,
         "timestamp": datetime.utcnow().isoformat(),
@@ -1135,15 +1523,11 @@ async def notify_real_time_comment(comment: FacebookComment, page: FacebookPage)
         "priority": comment.priority
     }
     
-    # Exemple: Envoyer à un WebSocket
-    # await websocket_manager.broadcast(f"page_{page.id}", notification_data)
-    
     logger.info(f"📢 Notification commentaire: {comment.id}")
+    # Ici, vous pouvez intégrer avec WebSockets, SSE, etc.
 
 async def handle_postback(payload: str, sender_id: str, page: FacebookPage, db: Session):
     """Gère les postbacks Messenger"""
-    # Exemple de payload: "GET_STARTED", "VIEW_PRODUCTS", "CONTACT_SUPPORT"
-    
     if payload == "GET_STARTED":
         # Message de bienvenue
         welcome_message = "Bienvenue sur notre page ! Comment puis-je vous aider ?"
@@ -1170,27 +1554,49 @@ async def handle_postback(payload: str, sender_id: str, page: FacebookPage, db: 
     db.add(interaction)
     db.commit()
 
-# Helper functions à compléter selon votre implémentation
+# Helper functions
 async def process_conversations_change(value: dict, page: FacebookPage, db: Session):
     """Traite les changements de conversations"""
-    pass
+    logger.info(f"🔄 Conversation change: {value}")
 
 async def process_ratings_change(value: dict, page: FacebookPage, db: Session):
     """Traite les changements de ratings"""
-    pass
+    logger.info(f"⭐ Rating change: {value}")
 
 async def process_mention_change(value: dict, page: FacebookPage, db: Session):
     """Traite les mentions"""
-    pass
+    logger.info(f"@ Mention change: {value}")
 
 async def process_standby_event(event: dict, page: FacebookPage, db: Session):
     """Traite les événements standby"""
-    pass
+    logger.info(f"⏳ Standby event: {event}")
 
 async def update_comment(comment_id: str, page: FacebookPage, db: Session):
     """Met à jour un commentaire"""
-    pass
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://graph.facebook.com/v18.0/{comment_id}",
+                params={
+                    "fields": "id,message,from{id,name},like_count",
+                    "access_token": page.page_access_token
+                }
+            )
+            
+            if response.status_code == 200:
+                comment_data = response.json()
+                comment = db.query(FacebookComment).filter(FacebookComment.id == comment_id).first()
+                if comment:
+                    comment.message = comment_data.get("message")
+                    comment.updated_at = datetime.utcnow()
+                    db.commit()
+    except Exception as e:
+        logger.error(f"❌ Erreur update comment {comment_id}: {e}")
 
 async def mark_comment_deleted(comment_id: str, db: Session):
     """Marque un commentaire comme supprimé"""
-    pass
+    comment = db.query(FacebookComment).filter(FacebookComment.id == comment_id).first()
+    if comment:
+        comment.status = "deleted"
+        comment.updated_at = datetime.utcnow()
+        db.commit()

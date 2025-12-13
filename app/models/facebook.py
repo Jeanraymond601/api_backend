@@ -69,6 +69,15 @@ class FacebookPage(Base):
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # ⭐ SIMPLIFIE : Enlève la relation comments ici (gérée par backref dans FacebookComment)
+    # comments = relationship(...)  # ← ENLÈVE CETTE LIGNE
+    
+    # Relation avec FacebookUser
+    facebook_user = relationship("FacebookUser")  # ← Sans back_populates
+    
+    # Relation avec Seller
+    seller = relationship("Seller")  # ← Sans back_populates
 
 
 class FacebookPost(Base):
@@ -151,7 +160,7 @@ class FacebookLiveVideo(Base):
 class FacebookComment(Base):
     __tablename__ = "facebook_comments"
 
-    # ID (déjà dans votre schéma)
+    # ID
     id = Column(String(100), primary_key=True)
     
     # Comment Info
@@ -159,14 +168,20 @@ class FacebookComment(Base):
     user_id = Column(String(100), nullable=True)
     user_name = Column(String(255), nullable=True)
     
-    # ⭐ AJOUT: Champ pour lier à la page
-    page_id = Column(String(100), nullable=True)
+    # ⭐ CORRECT : UN SEUL page_id (UUID)
+    page_id = Column(UUID(as_uuid=True), ForeignKey('facebook_pages.id'), nullable=True)
+    
+    # ⭐ COLONNES NLP
+    intent = Column(String(50), nullable=True)
+    sentiment = Column(String(50), nullable=True)
+    entities = Column(JSON, nullable=True)
+    priority = Column(String(20), nullable=True)
     
     # Foreign Keys
     seller_id = Column(UUID(as_uuid=True), ForeignKey("sellers.id"), nullable=False)
     post_id = Column(String(100), nullable=True)
     
-    # Status (utilise votre enum existant)
+    # Status
     status = Column(String(20), default='new')
     
     # NLP Processing
@@ -196,7 +211,12 @@ class FacebookComment(Base):
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-
+    
+    # ⭐ SIMPLIFIE : Utilise backref OU rien
+    page = relationship("FacebookPage", backref="comments")  # ← backref au lieu de back_populates
+    
+    # Relation avec Seller
+    seller = relationship("Seller")  # ← Simple, sans back_populates
 
 class FacebookMessage(Base):
     __tablename__ = "messages"

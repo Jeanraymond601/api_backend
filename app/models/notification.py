@@ -4,13 +4,15 @@ from typing import Dict, Any, Optional
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from app.db import Base
+from sqlalchemy.dialects.postgresql import UUID
+import uuid
 
 class Notification(Base):
     """Modèle pour les notifications"""
     __tablename__ = "notifications"
     
-    id = Column(Integer, primary_key=True, index=True)
-    seller_id = Column(Integer, ForeignKey("sellers.id"), nullable=False, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    seller_id = Column(UUID(as_uuid=True), ForeignKey("sellers.id"), nullable=False, index=True)
     
     # Type de notification
     type = Column(String(50), nullable=False, index=True)  # 'facebook', 'product', 'system', 'alert'

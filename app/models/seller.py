@@ -24,6 +24,7 @@ class Seller(Base):
     
     # ✅ CORRECTION: Relations SIMPLIFIÉES
     user = relationship("User", back_populates="seller")
+    notifications = relationship("Notification", back_populates="seller", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Seller(id={self.id}, company_name={self.company_name})>"

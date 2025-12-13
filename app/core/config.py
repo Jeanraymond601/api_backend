@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     FACEBOOK_WEBHOOK_URL: Optional[str] = "http://localhost:8000/api/v1/facebook/webhook"
     # ==========================================================================
     
+    # ⭐ AJOUTE CETTE LIGNE :
+    APP_URL: Optional[str] = "http://localhost:8000"  # ← AJOUTÉ ICI
+    
     # Application
     ENV: Optional[str] = "development"
     PROJECT_NAME: Optional[str] = "Live Commerce API"
@@ -61,10 +64,10 @@ class Settings(BaseSettings):
                 return [origin.strip() for origin in v.split(",")]
             return v
 
-# Instanciation
+# ⭐⭐⭐ AJOUTE CETTE LIGNE À LA FIN DU FICHIER ⭐⭐⭐
 settings = Settings()
 
-# Test de chargement et fallback
+# Garde le code de test si tu veux
 if __name__ == "__main__":
     print("✅ Configuration chargée avec succès!")
     print("="*50)
@@ -99,6 +102,7 @@ if __name__ == "__main__":
     
     print("\n⚙️ Application:")
     print("  Environment:", settings.ENV)
+    print("  APP_URL:", settings.APP_URL)  # ⭐ NOUVEAU
     
     print("\n" + "="*50)
     
