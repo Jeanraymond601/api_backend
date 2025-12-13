@@ -63,6 +63,6 @@ tmp/
 
 # Supabase local
 supabase/
-"live-commerce-api.tar" 
-"*.tar" 
-"*.zip" 
+live-commerce-api.tar
+*.tar
+*.zip
