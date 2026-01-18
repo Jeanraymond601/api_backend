@@ -1,196 +1,380 @@
 # app/services/facebook_graph_api.py
 import httpx
 import logging
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
-import json
 import asyncio
+import json
+from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
 class FacebookGraphAPIService:
     """
-    Service pour interagir avec l'API Graph de Facebook
-    Documentation: https://developers.facebook.com/docs/graph-api
+    🔥 SERVICE COMPLET CORRIGÉ pour l'API Graph Facebook
+    Version Production - Optimisé pour Live Commerce
+    Avec gestion robuste des erreurs et retry automatique
     """
     
-    BASE_URL = "https://graph.facebook.com/v18.0"
-    
-    def __init__(self, timeout: int = 30):
+    def __init__(self, api_version: str = "v18.0", timeout: int = 30):
+        self.base_url = f"https://graph.facebook.com/{api_version}"
         self.timeout = timeout
-        self.client = httpx.AsyncClient(timeout=timeout)
+        self.client = None
+        self.rate_limit_remaining = 100  # Estimation
+        self.last_request_time = None
+        
+        logger.info(f"🚀 FacebookGraphAPIService initialisé (v{api_version})")
+    
+    async def _ensure_client(self):
+        """Crée ou recrée le client HTTP si nécessaire"""
+        if self.client is None or self.client.is_closed:
+            transport = httpx.AsyncHTTPTransport(retries=3)
+            self.client = httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=transport,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            )
     
     async def close(self):
-        """Ferme le client HTTP"""
-        await self.client.aclose()
+        """Ferme proprement le client"""
+        if self.client and not self.client.is_closed:
+            await self.client.aclose()
+            self.client = None
     
-    async def make_request(
+    async def __aenter__(self):
+        await self._ensure_client()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+    
+    # ==================== CORE REQUEST METHOD ====================
+    
+    async def _make_request(
         self, 
         method: str, 
         endpoint: str, 
         params: Dict = None, 
         data: Dict = None,
-        headers: Dict = None
-    ) -> Dict:
+        headers: Dict = None,
+        retries: int = 2,
+        backoff_factor: float = 1.5
+    ) -> Dict[str, Any]:
         """
-        Fait une requête à l'API Graph Facebook
+        🔥 CORRIGÉ: Méthode de requête robuste avec retry exponentiel
         """
-        url = f"{self.BASE_URL}/{endpoint.lstrip('/')}"
+        await self._ensure_client()
         
-        default_params = params or {}
-        default_headers = headers or {}
+        # Construire l'URL complète
+        if endpoint.startswith(("http://", "https://")):
+            url = endpoint
+        else:
+            url = f"{self.base_url}/{endpoint.lstrip('/')}"
         
-        try:
-            if method.upper() == "GET":
-                response = await self.client.get(
-                    url, 
-                    params=default_params,
-                    headers=default_headers
-                )
-            elif method.upper() == "POST":
-                response = await self.client.post(
-                    url,
-                    params=default_params,
-                    json=data,
-                    headers=default_headers
-                )
-            elif method.upper() == "DELETE":
-                response = await self.client.delete(
-                    url,
-                    params=default_params,
-                    headers=default_headers
-                )
-            else:
-                raise ValueError(f"Méthode non supportée: {method}")
-            
-            response.raise_for_status()
-            return response.json()
-            
-        except httpx.HTTPStatusError as e:
-            error_data = {}
+        # Headers par défaut
+        default_headers = {
+            "User-Agent": "FacebookGraphAPI/1.0 (LiveCommerce)",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+        }
+        if headers:
+            default_headers.update(headers)
+        
+        # Gestion du rate limiting
+        await self._respect_rate_limit()
+        
+        last_exception = None
+        
+        for attempt in range(retries + 1):
             try:
-                error_data = e.response.json()
-            except:
-                error_data = {"error": {"message": str(e)}}
-            
-            logger.error(f"Erreur API Facebook {method} {endpoint}: {error_data}")
-            raise Exception(f"Facebook API Error: {error_data.get('error', {}).get('message', str(e))}")
-            
+                # Backoff exponentiel avant les retries
+                if attempt > 0:
+                    wait_time = backoff_factor ** attempt  # 1.5^1, 1.5^2, ...
+                    logger.warning(f"🔄 Retry {attempt}/{retries} dans {wait_time:.1f}s")
+                    await asyncio.sleep(wait_time)
+                
+                # Préparer les paramètres de la requête
+                request_params = {}
+                if params:
+                    # Filtrer les paramètres None
+                    request_params = {k: v for k, v in params.items() if v is not None}
+                
+                # Faire la requête
+                logger.debug(f"📤 Facebook API: {method} {url} (attempt {attempt + 1})")
+                
+                if method.upper() == "GET":
+                    response = await self.client.get(
+                        url, 
+                        params=request_params, 
+                        headers=default_headers
+                    )
+                elif method.upper() == "POST":
+                    response = await self.client.post(
+                        url, 
+                        params=request_params,
+                        json=data if data else None,
+                        headers=default_headers
+                    )
+                elif method.upper() == "DELETE":
+                    response = await self.client.delete(
+                        url, 
+                        params=request_params,
+                        headers=default_headers
+                    )
+                elif method.upper() == "PUT":
+                    response = await self.client.put(
+                        url,
+                        params=request_params,
+                        json=data if data else None,
+                        headers=default_headers
+                    )
+                else:
+                    raise ValueError(f"Méthode non supportée: {method}")
+                
+                # Mettre à jour le timestamp de la dernière requête
+                self.last_request_time = datetime.utcnow()
+                
+                # Analyser la réponse
+                logger.debug(f"📥 Response: {response.status_code}")
+                
+                # Gérer les erreurs HTTP
+                if response.status_code >= 500:
+                    error_msg = f"Erreur serveur Facebook: {response.status_code}"
+                    logger.warning(f"⚠️ {error_msg}")
+                    
+                    if attempt < retries:
+                        continue
+                    else:
+                        response.raise_for_status()
+                
+                # Pour les erreurs 4xx, on ne retry pas (sauf 429 - rate limit)
+                if response.status_code in [429] and attempt < retries:
+                    # Rate limit - attendre plus longtemps
+                    await asyncio.sleep(5 * (attempt + 1))
+                    continue
+                
+                response.raise_for_status()
+                
+                # Parser la réponse JSON
+                if response.content:
+                    result = response.json()
+                    
+                    # 🔥 VÉRIFIER LES ERREURS FACEBOOK DANS LA RÉPONSE
+                    if "error" in result:
+                        error_data = result["error"]
+                        error_code = error_data.get("code")
+                        error_msg = error_data.get("message", "Erreur Facebook inconnue")
+                        error_type = error_data.get("type", "OAuthException")
+                        
+                        logger.error(f"📛 Facebook API Error [{error_code}]: {error_msg}")
+                        
+                        # Gestion spécifique par code d'erreur
+                        if error_code in [190, 2500]:  # Token expiré/invalide
+                            raise Exception(f"Token Facebook expiré ou invalide: {error_msg}")
+                        elif error_code == 200:  # Permission manquante
+                            raise Exception(f"Permission manquante: {error_msg}")
+                        elif error_code == 100:  # Paramètre invalide
+                            raise Exception(f"Paramètre API invalide: {error_msg}")
+                        elif error_code == 4:  # Rate limit
+                            if attempt < retries:
+                                await asyncio.sleep(10)  # Longue attente pour rate limit
+                                continue
+                            raise Exception(f"Rate limit atteint: {error_msg}")
+                        elif error_code == 10:  # IP non autorisée
+                            raise Exception(f"IP non autorisée: {error_msg}")
+                        elif error_code == 368:  # Temporary block
+                            raise Exception(f"Compte temporairement bloqué: {error_msg}")
+                        else:
+                            raise Exception(f"Erreur Facebook [{error_code}]: {error_msg}")
+                    
+                    # Mettre à jour les infos de rate limit depuis les headers
+                    await self._update_rate_limit_from_headers(response.headers)
+                    
+                    return result
+                else:
+                    # Réponse vide mais succès
+                    return {"success": True, "id": url.split('/')[-1]}
+                
+            except httpx.HTTPStatusError as e:
+                last_exception = e
+                status_code = e.response.status_code if e.response else 0
+                
+                logger.error(f"❌ HTTP Error {status_code} on {method} {url}")
+                
+                # Ne pas retry pour les erreurs client (4xx) sauf 429
+                if status_code < 500 and status_code != 429:
+                    break
+                    
+                if attempt < retries:
+                    continue
+                else:
+                    # Essayer de récupérer le message d'erreur
+                    try:
+                        error_data = e.response.json()
+                        error_msg = error_data.get("error", {}).get("message", str(e))
+                    except:
+                        error_msg = str(e)
+                    
+                    raise Exception(f"Facebook API HTTP Error: {error_msg}")
+                    
+            except httpx.TimeoutException:
+                last_exception = "Timeout"
+                logger.error(f"⏱️ Timeout on {method} {url}")
+                
+                if attempt < retries:
+                    continue
+                raise Exception("Timeout Facebook API")
+                
+            except httpx.RequestError as e:
+                last_exception = e
+                logger.error(f"🌐 Network error: {e}")
+                
+                if attempt < retries:
+                    continue
+                raise Exception(f"Erreur réseau Facebook: {str(e)}")
+                
+            except Exception as e:
+                last_exception = e
+                logger.error(f"💥 Unexpected error: {e}", exc_info=True)
+                
+                if attempt < retries:
+                    continue
+                raise
+        
+        # Si on arrive ici, tous les retries ont échoué
+        raise Exception(f"Toutes les tentatives ont échoué: {last_exception}")
+    
+    async def _respect_rate_limit(self):
+        """Respecte les limites de rate de l'API Facebook"""
+        if self.last_request_time:
+            elapsed = (datetime.utcnow() - self.last_request_time).total_seconds()
+            # Facebook recommande max 200 req/heure => ~1 req/18s
+            if elapsed < 0.1:  # 100ms entre les requêtes minimum
+                await asyncio.sleep(0.1 - elapsed)
+        
+        # Si on a peu de requêtes restantes, on ralentit
+        if self.rate_limit_remaining < 10:
+            await asyncio.sleep(1.0)
+        elif self.rate_limit_remaining < 30:
+            await asyncio.sleep(0.5)
+    
+    async def _update_rate_limit_from_headers(self, headers: Dict):
+        """Met à jour les infos de rate limit depuis les headers"""
+        try:
+            if "X-App-Usage" in headers:
+                usage = json.loads(headers["X-App-Usage"])
+                call_count = usage.get("call_count", 0)
+                total_calls = usage.get("total_calls", 200)
+                
+                if total_calls > 0:
+                    self.rate_limit_remaining = max(0, total_calls - call_count)
+                    
+                    if self.rate_limit_remaining < 50:
+                        logger.warning(f"⚠️ Rate limit restant: {self.rate_limit_remaining}")
+                    
         except Exception as e:
-            logger.error(f"Erreur requête Facebook {method} {endpoint}: {e}")
-            raise
+            logger.debug(f"Could not parse rate limit headers: {e}")
     
-    # ==================== USER & AUTH ====================
+    # ==================== WEBHOOK SUBSCRIPTION (MÉTHODE MANQUANTE) ====================
     
-    async def get_user_info(self, access_token: str, user_id: str = "me") -> Dict:
-        """
-        Récupère les informations de l'utilisateur Facebook
-        """
-        return await self.make_request(
-            "GET",
-            f"{user_id}",
-            params={
-                "fields": "id,name,email,first_name,last_name,middle_name,"
-                         "picture{url},location,gender,age_range,birthday,"
-                         "link,website,verified",
-                "access_token": access_token
-            }
-        )
-    
-    async def get_user_pages(self, access_token: str) -> List[Dict]:
-        """
-        Récupère la liste des pages de l'utilisateur
-        """
-        result = await self.make_request(
-            "GET",
-            "me/accounts",
-            params={
-                "fields": "id,name,access_token,category,category_list,"
-                         "picture{url},cover{source},fan_count,about,"
-                         "description,emails,link,location,phone,"
-                         "website,tasks,verification_status,"
-                         "is_always_open,is_owned,is_published,"
-                         "global_brand_page_name,best_page",
-                "access_token": access_token,
-                "limit": 200
-            }
-        )
-        return result.get("data", [])
-    
-    async def debug_token(self, input_token: str, app_token: str) -> Dict:
-        """
-        Débogue un token Facebook
-        """
-        return await self.make_request(
-            "GET",
-            "debug_token",
-            params={
-                "input_token": input_token,
-                "access_token": app_token
-            }
-        )
-    
-    # ==================== PAGE MANAGEMENT ====================
-    
-    async def get_page_info(self, page_id: str, access_token: str) -> Dict:
-        """
-        Récupère les informations détaillées d'une page
-        """
-        return await self.make_request(
-            "GET",
-            page_id,
-            params={
-                "fields": "id,name,access_token,category,category_list,"
-                         "picture{url},cover{source},fan_count,about,"
-                         "description,emails,link,location,phone,"
-                         "website,tasks,verification_status,"
-                         "is_always_open,is_owned,is_published,"
-                         "global_brand_page_name,best_page,"
-                         "engagement{count},followers_count,"
-                         "new_like_count,rating_count,"
-                         "talking_about_count,were_here_count,"
-                         "checkins,impressum,products,"
-                         "restaurant_services,restaurant_specialties,"
-                         "hours,single_line_address,store_location_descriptor,"
-                         "price_range,parking,payment_options,"
-                         "attire,culinary_team,general_info,"
-                         "general_manager,personal_info,"
-                         "personal_interests,pharma_safety_info,"
-                         "public_transit",
-                "access_token": access_token
-            }
-        )
-    
-    async def get_page_insights(
+    async def subscribe_to_webhooks(
         self, 
         page_id: str, 
-        access_token: str,
-        metric: str = "page_engaged_users,page_impressions",
-        period: str = "day",
-        since: Optional[datetime] = None,
-        until: Optional[datetime] = None
-    ) -> List[Dict]:
+        access_token: str, 
+        fields: List[str]
+    ) -> Dict[str, Any]:
         """
-        Récupère les insights d'une page
+        🔥 MÉTHODE MANQUANTE AJOUTÉE
+        Souscrit aux webhooks Facebook pour une page
         """
-        params = {
-            "metric": metric,
-            "period": period,
-            "access_token": access_token
-        }
-        
-        if since:
-            params["since"] = int(since.timestamp())
-        if until:
-            params["until"] = int(until.timestamp())
-        
-        result = await self.make_request(
-            "GET",
-            f"{page_id}/insights",
-            params=params
-        )
-        return result.get("data", [])
+        try:
+            logger.info(f"🔔 Subscription webhook pour page {page_id}")
+            logger.info(f"   Champs: {fields}")
+            
+            url = f"{self.base_url}/{page_id}/subscribed_apps"
+            params = {
+                "access_token": access_token,
+                "subscribed_fields": ",".join(fields)
+            }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(url, params=params)
+                
+                logger.info(f"📤 Webhook subscription HTTP: {response.status_code}")
+                
+                if response.status_code != 200:
+                    error_text = response.text[:500]
+                    logger.error(f"❌ Webhook subscription error: {error_text}")
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status_code}: {error_text}"
+                    }
+                
+                result = response.json()
+                
+                if "error" in result:
+                    error_msg = result["error"].get("message", "Unknown error")
+                    logger.error(f"❌ Facebook webhook error: {error_msg}")
+                    return {
+                        "success": False,
+                        "error": error_msg
+                    }
+                
+                if result.get("success", False):
+                    logger.info(f"✅ Webhooks souscrits avec succès pour {len(fields)} champs")
+                    return {
+                        "success": True,
+                        "message": f"Webhooks souscrits pour {len(fields)} champs",
+                        "fields": fields,
+                        "raw_response": result
+                    }
+                else:
+                    logger.warning(f"⚠️ Webhook subscription returned success=False")
+                    return {
+                        "success": False,
+                        "error": "Facebook API returned success=False",
+                        "raw_response": result
+                    }
+                
+        except httpx.TimeoutException:
+            logger.error("⏱️ Timeout lors de la subscription webhook")
+            return {
+                "success": False,
+                "error": "Timeout Facebook API"
+            }
+        except Exception as e:
+            logger.error(f"❌ Erreur subscription webhook: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def unsubscribe_from_webhooks(
+        self, 
+        page_id: str, 
+        access_token: str
+    ) -> Dict[str, Any]:
+        """
+        Désinscrit une page des webhooks
+        """
+        try:
+            url = f"{self.base_url}/{page_id}/subscribed_apps"
+            params = {"access_token": access_token}
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(url, params=params)
+                result = response.json()
+                
+                if "error" in result:
+                    return {"success": False, "error": result["error"].get("message")}
+                
+                return {"success": True, "message": "Webhooks désinscrits"}
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur désinscription webhook: {e}")
+            return {"success": False, "error": str(e)}
+    
+    # ==================== PAGE POSTS & COMMENTS ====================
     
     async def get_page_posts(
         self, 
@@ -198,118 +382,132 @@ class FacebookGraphAPIService:
         access_token: str,
         limit: int = 100,
         since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
         fields: str = None
-    ) -> List[Dict]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Récupère les posts d'une page
-        """
-        default_fields = (
-            "id,message,created_time,updated_time,story,"
-            "full_picture,picture,permalink_url,status_type,"
-            "type,is_hidden,is_expired,is_published,is_instagram_eligible,"
-            "is_popular,attachments{media_type,title,url,target,description},"
-            "comments.limit(0).summary(true),"
-            "likes.limit(0).summary(true),"
-            "shares,reactions.limit(0).summary(true)"
-        )
-        
-        params = {
-            "fields": fields or default_fields,
-            "access_token": access_token,
-            "limit": limit
-        }
-        
-        if since:
-            params["since"] = int(since.timestamp())
-        
-        result = await self.make_request(
-            "GET",
-            f"{page_id}/posts",
-            params=params
-        )
-        return result.get("data", [])
-    
-    async def publish_post(
-        self,
-        page_id: str,
-        access_token: str,
-        message: str = None,
-        link: str = None,
-        photos: List[str] = None,
-        scheduled_publish_time: Optional[datetime] = None,
-        published: bool = True
-    ) -> Dict:
-        """
-        Publie un post sur une page
-        """
-        data = {}
-        
-        if message:
-            data["message"] = message
-        if link:
-            data["link"] = link
-        if scheduled_publish_time:
-            data["scheduled_publish_time"] = int(scheduled_publish_time.timestamp())
-            data["published"] = False
-        else:
-            data["published"] = published
-        
-        endpoint = f"{page_id}/feed"
-        
-        # Si photos, upload d'abord les photos
-        if photos:
-            photo_ids = []
-            for photo_url in photos:
-                photo_id = await self.upload_photo(
-                    page_id, 
-                    photo_url, 
-                    access_token,
-                    published=False
-                )
-                if photo_id:
-                    photo_ids.append(photo_id)
-            
-            if photo_ids:
-                if len(photo_ids) == 1:
-                    data["attached_media"] = json.dumps([{"media_fbid": photo_ids[0]}])
-                else:
-                    # Pour plusieurs photos, créer un album
-                    album_id = await self.create_album(
-                        page_id,
-                        "Post photos",
-                        access_token
-                    )
-                    if album_id:
-                        for photo_id in photo_ids:
-                            await self.add_photo_to_album(
-                                album_id,
-                                photo_id,
-                                access_token
-                            )
-                        data["attached_media"] = json.dumps([{"media_fbid": photo_ids[0]}])
-        
-        return await self.make_request(
-            "POST",
-            endpoint,
-            params={"access_token": access_token},
-            data=data
-        )
-    
-    async def delete_post(self, post_id: str, access_token: str) -> bool:
-        """
-        Supprime un post
+        🔥 VERSION CORRIGÉE sans champs dépréciés
         """
         try:
-            await self.make_request(
-                "DELETE",
-                post_id,
-                params={"access_token": access_token}
-            )
-            return True
-        except:
-            return False
-    
-    # ==================== COMMENTS ====================
+            # ⭐⭐ CHAMPS SANS "type" ni .summary() qui sont dépréciés
+            # ⭐⭐ UTILISEZ DES CHAMPS SIMPLES SEULEMENT
+            if fields is None:
+                fields = "id,message,story,created_time"
+            
+            params = {
+                "access_token": access_token,
+                "limit": min(limit, 100),
+                "fields": fields
+            }
+            
+            # Optionnel: ajouter since
+            if since:
+                params["since"] = int(since.timestamp())
+            
+            logger.info(f"🔄 get_page_posts SIMPLE: {page_id}")
+            logger.info(f"   Fields: {fields}")
+            
+            # Faire la requête
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                url = f"https://graph.facebook.com/v18.0/{page_id}/posts"
+                response = await client.get(url, params=params)
+                
+                logger.info(f"📥 HTTP Status: {response.status_code}")
+                
+                if response.status_code != 200:
+                    error_text = response.text[:500]
+                    logger.error(f"❌ Facebook API Error: {error_text}")
+                    return [], {}
+                
+                result = response.json()
+                
+                if "error" in result:
+                    error_msg = result["error"].get("message", "Unknown")
+                    logger.error(f"❌ Facebook API Error: {error_msg}")
+                    return [], {}
+                
+                posts = result.get("data", [])
+                paging = result.get("paging", {})
+                
+                logger.info(f"✅ {len(posts)} posts récupérés de Facebook")
+                
+                # DEBUG: Afficher quelques posts
+                for i, post in enumerate(posts[:3]):
+                    logger.info(f"   Post {i+1}: {post.get('id')}")
+                    logger.info(f"      Has message: {'message' in post}")
+                    logger.info(f"      Has story: {'story' in post}")
+                    if post.get('message'):
+                        logger.info(f"      Message: '{post['message'][:50]}...'")
+                
+                return posts, paging
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur get_page_posts: {e}", exc_info=True)
+            return [], {}
+
+    async def get_post_stats(self, post_id: str, access_token: str) -> Dict[str, Any]:
+        """
+        🔥 Récupère les statistiques d'un post séparément (likes, comments, shares)
+        car les champs .summary() sont dépréciés dans la requête principale
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Récupérer les likes
+                likes_url = f"https://graph.facebook.com/v18.0/{post_id}/likes"
+                likes_params = {
+                    "access_token": access_token,
+                    "summary": "true",
+                    "limit": 0
+                }
+                
+                likes_response = await client.get(likes_url, params=likes_params)
+                likes_data = likes_response.json() if likes_response.status_code == 200 else {}
+                
+                # Récupérer les comments
+                comments_url = f"https://graph.facebook.com/v18.0/{post_id}/comments"
+                comments_params = {
+                    "access_token": access_token,
+                    "summary": "true",
+                    "limit": 0,
+                    "filter": "stream"
+                }
+                
+                comments_response = await client.get(comments_url, params=comments_params)
+                comments_data = comments_response.json() if comments_response.status_code == 200 else {}
+                
+                # Récupérer les shares
+                post_url = f"https://graph.facebook.com/v18.0/{post_id}"
+                post_params = {
+                    "access_token": access_token,
+                    "fields": "shares"
+                }
+                
+                post_response = await client.get(post_url, params=post_params)
+                post_data = post_response.json() if post_response.status_code == 200 else {}
+                
+                # Extraire les counts
+                likes_count = likes_data.get("summary", {}).get("total_count", 0)
+                comments_count = comments_data.get("summary", {}).get("total_count", 0)
+                shares_count = post_data.get("shares", {}).get("count", 0) if post_data.get("shares") else 0
+                
+                return {
+                    "likes_count": likes_count,
+                    "comments_count": comments_count,
+                    "shares_count": shares_count,
+                    "raw": {
+                        "likes": likes_data,
+                        "comments": comments_data,
+                        "post": post_data
+                    }
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur get_post_stats: {e}")
+            return {
+                "likes_count": 0,
+                "comments_count": 0,
+                "shares_count": 0
+            }
     
     async def get_post_comments(
         self, 
@@ -317,245 +515,55 @@ class FacebookGraphAPIService:
         access_token: str,
         limit: int = 100,
         filter_by: str = "stream",
-        order: str = "chronological"
-    ) -> List[Dict]:
+        order: str = "chronological",
+        include_replies: bool = False
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Récupère les commentaires d'un post
+        🔥 Récupère les commentaires d'un post (version corrigée)
         """
-        result = await self.make_request(
-            "GET",
-            f"{post_id}/comments",
-            params={
-                "fields": "id,message,created_time,from{id,name,picture{url}},"
-                         "like_count,comment_count,parent,attachment,"
-                         "message_tags,is_hidden,user_likes",
+        try:
+            # Champs avec from pour avoir le nom de l'utilisateur
+            fields = "id,message,created_time,from{id,name}"
+            
+            params = {
+                "fields": fields,
                 "access_token": access_token,
-                "limit": limit,
+                "limit": min(limit, 100),
                 "filter": filter_by,
                 "order": order
             }
-        )
-        return result.get("data", [])
-    
-    async def get_comment_replies(
-        self, 
-        comment_id: str, 
-        access_token: str,
-        limit: int = 50
-    ) -> List[Dict]:
-        """
-        Récupère les réponses à un commentaire
-        """
-        result = await self.make_request(
-            "GET",
-            f"{comment_id}/comments",
-            params={
-                "fields": "id,message,created_time,from{id,name},like_count",
-                "access_token": access_token,
-                "limit": limit
-            }
-        )
-        return result.get("data", [])
-    
-    async def post_comment(
-        self, 
-        post_id: str, 
-        access_token: str,
-        message: str,
-        attachment_id: str = None,
-        attachment_url: str = None
-    ) -> Dict:
-        """
-        Poste un commentaire sur un post
-        """
-        data = {"message": message}
-        
-        if attachment_id:
-            data["attachment_id"] = attachment_id
-        elif attachment_url:
-            data["attachment_url"] = attachment_url
-        
-        return await self.make_request(
-            "POST",
-            f"{post_id}/comments",
-            params={"access_token": access_token},
-            data=data
-        )
-    
-    async def send_comment_reply(
-        self, 
-        comment_id: str, 
-        message: str,
-        access_token: str
-    ) -> Dict:
-        """
-        Répond à un commentaire
-        """
-        return await self.make_request(
-            "POST",
-            f"{comment_id}/comments",
-            params={"access_token": access_token},
-            data={"message": message}
-        )
-    
-    async def hide_comment(self, comment_id: str, access_token: str, hide: bool = True) -> bool:
-        """
-        Cache ou affiche un commentaire
-        """
-        try:
-            await self.make_request(
-                "POST",
-                comment_id,
-                params={"access_token": access_token},
-                data={"is_hidden": hide}
-            )
-            return True
-        except:
-            return False
-    
-    async def like_comment(self, comment_id: str, access_token: str) -> bool:
-        """
-        Like un commentaire
-        """
-        try:
-            await self.make_request(
-                "POST",
-                f"{comment_id}/likes",
-                params={"access_token": access_token}
-            )
-            return True
-        except:
-            return False
-    
-    # ==================== MESSENGER ====================
-    
-    async def send_message(
-        self,
-        page_id: str,
-        recipient_id: str,
-        message_text: str = None,
-        access_token: str = None,
-        messaging_type: str = "RESPONSE",
-        tag: str = None,
-        quick_replies: List[Dict] = None,
-        attachment: Dict = None
-    ) -> Dict:
-        """
-        Envoie un message Messenger
-        """
-        data = {
-            "recipient": {"id": recipient_id},
-            "messaging_type": messaging_type
-        }
-        
-        if message_text:
-            data["message"] = {"text": message_text}
-        elif attachment:
-            data["message"] = {"attachment": attachment}
-        
-        if tag:
-            data["tag"] = tag
-        
-        if quick_replies:
-            if "message" not in data:
-                data["message"] = {}
-            data["message"]["quick_replies"] = quick_replies
-        
-        return await self.make_request(
-            "POST",
-            f"{page_id}/messages",
-            params={"access_token": access_token},
-            data=data
-        )
-    
-    async def send_template_message(
-        self,
-        page_id: str,
-        recipient_id: str,
-        template: Dict,
-        access_token: str
-    ) -> Dict:
-        """
-        Envoie un message template Messenger
-        """
-        data = {
-            "recipient": {"id": recipient_id},
-            "message": {"attachment": {
-                "type": "template",
-                "payload": template
-            }}
-        }
-        
-        return await self.make_request(
-            "POST",
-            f"{page_id}/messages",
-            params={"access_token": access_token},
-            data=data
-        )
-    
-    async def get_user_profile(
-        self, 
-        user_id: str, 
-        page_id: str, 
-        access_token: str
-    ) -> Dict:
-        """
-        Récupère le profil Messenger d'un utilisateur
-        """
-        return await self.make_request(
-            "GET",
-            user_id,
-            params={
-                "fields": "first_name,last_name,profile_pic,locale,timezone,gender",
-                "access_token": access_token
-            }
-        )
-    
-    async def mark_message_as_read(
-        self, 
-        recipient_id: str, 
-        page_id: str,
-        access_token: str
-    ) -> bool:
-        """
-        Marque un message comme lu
-        """
-        try:
-            await self.make_request(
-                "POST",
-                f"{page_id}/messages",
-                params={"access_token": access_token},
-                data={
-                    "recipient": {"id": recipient_id},
-                    "sender_action": "mark_seen"
-                }
-            )
-            return True
-        except:
-            return False
-    
-    async def typing_on(
-        self, 
-        recipient_id: str, 
-        page_id: str,
-        access_token: str
-    ) -> bool:
-        """
-        Active l'indicateur "typing" (écriture en cours)
-        """
-        try:
-            await self.make_request(
-                "POST",
-                f"{page_id}/messages",
-                params={"access_token": access_token},
-                data={
-                    "recipient": {"id": recipient_id},
-                    "sender_action": "typing_on"
-                }
-            )
-            return True
-        except:
-            return False
+            
+            logger.info(f"🔍 Récupération commentaires post {post_id}")
+            
+            # Faire la requête directement
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                url = f"https://graph.facebook.com/v18.0/{post_id}/comments"
+                response = await client.get(url, params=params)
+                
+                logger.info(f"📥 Commentaires HTTP Status: {response.status_code}")
+                
+                if response.status_code != 200:
+                    error_text = response.text[:200]
+                    logger.error(f"❌ Facebook API Error (comments): {error_text}")
+                    return [], {}
+                
+                result = response.json()
+                
+                if "error" in result:
+                    error_msg = result["error"].get("message", "Unknown")
+                    logger.error(f"❌ Facebook API Error (comments): {error_msg}")
+                    return [], {}
+                
+                comments = result.get("data", [])
+                paging = result.get("paging", {})
+                
+                logger.info(f"📊 {len(comments)} commentaires récupérés pour post {post_id}")
+                
+                return comments, paging
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur récupération commentaires: {e}", exc_info=True)
+            return [], {}
     
     # ==================== LIVE VIDEOS ====================
     
@@ -563,536 +571,358 @@ class FacebookGraphAPIService:
         self, 
         page_id: str, 
         access_token: str,
-        limit: int = 50,
-        broadcast_status: str = None
-    ) -> List[Dict]:
+        limit: int = 20,
+        status: str = None
+    ) -> List[Dict[str, Any]]:
         """
         Récupère les lives vidéos d'une page
         """
-        params = {
-            "fields": "id,title,description,status,creation_time,"
-                     "scheduled_start_time,live_views,end_time,"
-                     "permalink_url,from,embed_html,length,"
-                     "source,broadcast_start_time,"
-                     "comments.limit(10){id,message,from,created_time}",
-            "access_token": access_token,
-            "limit": limit
-        }
-        
-        if broadcast_status:
-            params["broadcast_status"] = broadcast_status
-        
-        result = await self.make_request(
-            "GET",
-            f"{page_id}/live_videos",
-            params=params
-        )
-        return result.get("data", [])
-    
-    async def get_live_video_insights(
-        self, 
-        video_id: str, 
-        access_token: str,
-        metric: str = "total_video_views"
-    ) -> List[Dict]:
-        """
-        Récupère les insights d'une vidéo live
-        """
-        result = await self.make_request(
-            "GET",
-            f"{video_id}/video_insights",
-            params={
-                "metric": metric,
-                "access_token": access_token
+        try:
+            fields = "id,title,description,status,creation_time,live_views,stream_url,permalink_url"
+            
+            params = {
+                "fields": fields,
+                "access_token": access_token,
+                "limit": min(limit, 50)
             }
-        )
-        return result.get("data", [])
+            
+            if status:
+                params["status"] = status
+            
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/{page_id}/live_videos"
+                response = await client.get(url, params=params)
+                result = response.json()
+                
+                if "error" in result:
+                    logger.error(f"❌ Erreur récupération lives: {result['error'].get('message')}")
+                    return []
+                
+                return result.get("data", [])
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur get_live_videos: {e}")
+            return []
     
     async def get_live_comments(
         self, 
         video_id: str, 
         access_token: str,
-        limit: int = 100,
-        filter_by: str = "stream",
-        order: str = "chronological",
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Récupère les commentaires d'un live vidéo
+        """
+        return await self.get_post_comments(video_id, access_token, limit=limit)
+    
+    # ==================== PAGE & USER INFO ====================
+    
+    async def get_user_pages(self, user_access_token: str) -> List[Dict[str, Any]]:
+        """
+        🔥 Récupère les pages de l'utilisateur
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"https://graph.facebook.com/v18.0/me/accounts"
+                params = {
+                    "access_token": user_access_token,
+                    "fields": "id,name,access_token,category,fan_count,picture{url}",
+                    "limit": 200
+                }
+                
+                response = await client.get(url, params=params)
+                result = response.json()
+                
+                if "error" in result:
+                    logger.error(f"❌ Erreur récupération pages: {result['error'].get('message')}")
+                    return []
+                
+                pages = result.get("data", [])
+                
+                formatted_pages = []
+                for page in pages:
+                    formatted = {
+                        "id": page.get("id"),
+                        "name": page.get("name", "Sans nom"),
+                        "access_token": page.get("access_token", ""),
+                        "category": page.get("category"),
+                        "fan_count": page.get("fan_count", 0),
+                        "profile_pic_url": page.get("picture", {}).get("data", {}).get("url") 
+                            if page.get("picture") else None
+                    }
+                    formatted_pages.append(formatted)
+                
+                logger.info(f"✅ {len(formatted_pages)} pages récupérées")
+                return formatted_pages
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur récupération pages: {e}")
+            return []
+    
+    async def debug_token(self, input_token: str, app_id: str, app_secret: str) -> Dict[str, Any]:
+        """
+        🔥 Débogue un token Facebook
+        """
+        try:
+            app_token = f"{app_id}|{app_secret}"
+            
+            async with httpx.AsyncClient() as client:
+                url = f"https://graph.facebook.com/v18.0/debug_token"
+                params = {
+                    "input_token": input_token,
+                    "access_token": app_token
+                }
+                
+                response = await client.get(url, params=params)
+                result = response.json()
+                
+                data = result.get("data", {})
+                
+                return {
+                    "is_valid": data.get("is_valid", False),
+                    "user_id": data.get("user_id"),
+                    "app_id": data.get("app_id"),
+                    "scopes": data.get("scopes", []),
+                    "expires_at": data.get("expires_at"),
+                    "expires_at_human": datetime.fromtimestamp(data.get("expires_at", 0)).isoformat() 
+                        if data.get("expires_at", 0) > 0 else None
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur debug_token: {e}")
+            return {"is_valid": False, "error": str(e)}
+    
+    async def get_page_info(
+        self, 
+        page_id: str, 
+        access_token: str,
+        fields: str = "id,name,category,fan_count,picture{url},cover{source}"
+    ) -> Dict[str, Any]:
+        """
+        Récupère les informations d'une page
+        """
+        try:
+            params = {
+                "access_token": access_token,
+                "fields": fields
+            }
+            
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/{page_id}"
+                response = await client.get(url, params=params)
+                result = response.json()
+                
+                if "error" in result:
+                    logger.error(f"❌ Erreur récupération page info: {result['error'].get('message')}")
+                    return {}
+                
+                return result
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur get_page_info: {e}")
+            return {}
+    
+    # ==================== POST DETAILS ====================
+    
+    async def get_post_details(
+        self, 
+        post_id: str, 
+        access_token: str,
+        fields: str = "id,message,story,created_time,attachments{media}"
+    ) -> Dict[str, Any]:
+        """
+        Récupère les détails d'un post spécifique
+        """
+        try:
+            params = {
+                "access_token": access_token,
+                "fields": fields
+            }
+            
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/{post_id}"
+                response = await client.get(url, params=params)
+                result = response.json()
+                
+                if "error" in result:
+                    logger.error(f"❌ Erreur récupération post: {result['error'].get('message')}")
+                    return {}
+                
+                return result
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur get_post_details: {e}")
+            return {}
+    
+    async def get_live_details(
+        self, 
+        video_id: str, 
+        access_token: str,
+        fields: str = "id,title,description,status,creation_time,end_time,live_views,stream_url,permalink_url"
+    ) -> Dict[str, Any]:
+        """
+        Récupère les détails d'un live vidéo
+        """
+        return await self.get_post_details(video_id, access_token, fields)
+    
+    # ==================== COMMENT REPLY ====================
+    
+    async def reply_to_comment(
+        self, 
+        comment_id: str, 
+        access_token: str, 
+        message: str
+    ) -> Dict[str, Any]:
+        """
+        Répond à un commentaire Facebook
+        """
+        try:
+            url = f"{self.base_url}/{comment_id}/comments"
+            params = {
+                "access_token": access_token,
+                "message": message
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, params=params)
+                result = response.json()
+                
+                if "error" in result:
+                    return {
+                        "success": False,
+                        "error": result["error"].get("message", "Unknown error")
+                    }
+                
+                return {
+                    "success": True,
+                    "comment_id": result.get("id"),
+                    "message": "Réponse envoyée"
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur réponse commentaire: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def reply_to_post(
+        self, 
+        post_id: str, 
+        access_token: str, 
+        message: str
+    ) -> Dict[str, Any]:
+        """
+        Commenter directement sur un post
+        """
+        return await self.reply_to_comment(post_id, access_token, message)
+    
+    # ==================== SYNC OPERATIONS ====================
+    
+    async def sync_page_data(
+        self,
+        page_id: str,
+        access_token: str,
+        posts_limit: int = 50,
         since: Optional[datetime] = None
-    ) -> List[Dict]:
+    ) -> Dict[str, Any]:
         """
-        Récupère les commentaires d'un live
-        """
-        params = {
-            "fields": "id,message,created_time,from{id,name,picture{url}},"
-                     "like_count,attachment",
-            "access_token": access_token,
-            "limit": limit,
-            "filter": filter_by,
-            "order": order
-        }
-        
-        if since:
-            params["since"] = int(since.timestamp())
-        
-        result = await self.make_request(
-            "GET",
-            f"{video_id}/comments",
-            params=params
-        )
-        return result.get("data", [])
-    
-    async def create_live_video(
-        self,
-        page_id: str,
-        access_token: str,
-        title: str = None,
-        description: str = None,
-        scheduled_start_time: Optional[datetime] = None,
-        status: str = "SCHEDULED_UNPUBLISHED",
-        allow_bm_crossposting: bool = True
-    ) -> Dict:
-        """
-        Crée un live vidéo
-        """
-        data = {
-            "status": status,
-            "allow_bm_crossposting": allow_bm_crossposting
-        }
-        
-        if title:
-            data["title"] = title
-        if description:
-            data["description"] = description
-        if scheduled_start_time:
-            data["planned_start_time"] = int(scheduled_start_time.timestamp())
-        
-        return await self.make_request(
-            "POST",
-            f"{page_id}/live_videos",
-            params={"access_token": access_token},
-            data=data
-        )
-    
-    async def end_live_video(self, video_id: str, access_token: str) -> bool:
-        """
-        Termine un live vidéo
+        🔥 Synchronisation complète d'une page
         """
         try:
-            await self.make_request(
-                "POST",
-                video_id,
-                params={"access_token": access_token},
-                data={"end_live_video": True}
+            # Récupérer les posts
+            posts, paging = await self.get_page_posts(
+                page_id, access_token, 
+                limit=posts_limit, since=since
             )
-            return True
-        except:
-            return False
-    
-    # ==================== MEDIA UPLOAD ====================
-    
-    async def upload_photo(
-        self,
-        page_id: str,
-        photo_url: str,
-        access_token: str,
-        published: bool = True,
-        caption: str = None
-    ) -> Optional[str]:
-        """
-        Upload une photo sur une page
-        """
-        try:
-            # Télécharger la photo d'abord
-            async with httpx.AsyncClient() as client:
-                photo_response = await client.get(photo_url)
-                photo_response.raise_for_status()
-                
-                # Upload vers Facebook
-                files = {"source": photo_response.content}
-                data = {
-                    "access_token": access_token,
-                    "published": published
-                }
-                
-                if caption:
-                    data["caption"] = caption
-                
-                upload_response = await self.client.post(
-                    f"{self.BASE_URL}/{page_id}/photos",
-                    data=data,
-                    files=files
-                )
-                upload_response.raise_for_status()
-                
-                result = upload_response.json()
-                return result.get("id")
-                
-        except Exception as e:
-            logger.error(f"Erreur upload photo: {e}")
-            return None
-    
-    async def create_album(
-        self,
-        page_id: str,
-        name: str,
-        access_token: str,
-        description: str = None,
-        privacy: str = "{'value': 'EVERYONE'}"
-    ) -> Optional[str]:
-        """
-        Crée un album photo
-        """
-        try:
-            data = {
-                "name": name,
-                "privacy": privacy,
-                "access_token": access_token
+            
+            total_comments = 0
+            
+            # Pour chaque post, récupérer les stats et commentaires
+            for post in posts:
+                post_id = post.get("id")
+                if post_id:
+                    # Récupérer les stats (likes, comments, shares)
+                    stats = await self.get_post_stats(post_id, access_token)
+                    post["stats"] = stats
+                    
+                    # Récupérer les commentaires si besoin
+                    if stats["comments_count"] > 0:
+                        comments, _ = await self.get_post_comments(
+                            post_id, access_token,
+                            limit=min(stats["comments_count"], 100)
+                        )
+                        post["comments"] = comments
+                        total_comments += len(comments)
+            
+            return {
+                "success": True,
+                "page_id": page_id,
+                "posts": posts,
+                "total_posts": len(posts),
+                "total_comments": total_comments,
+                "has_more": "next" in paging if paging else False
             }
-            
-            if description:
-                data["description"] = description
-            
-            result = await self.make_request(
-                "POST",
-                f"{page_id}/albums",
-                data=data
-            )
-            return result.get("id")
             
         except Exception as e:
-            logger.error(f"Erreur création album: {e}")
-            return None
-    
-    async def add_photo_to_album(
-        self,
-        album_id: str,
-        photo_id: str,
-        access_token: str
-    ) -> bool:
-        """
-        Ajoute une photo à un album
-        """
-        try:
-            await self.make_request(
-                "POST",
-                f"{album_id}/photos",
-                params={"access_token": access_token},
-                data={"photo_id": photo_id}
-            )
-            return True
-        except:
-            return False
-    
-    async def upload_video(
-        self,
-        page_id: str,
-        video_url: str,
-        access_token: str,
-        title: str = None,
-        description: str = None,
-        published: bool = True
-    ) -> Optional[str]:
-        """
-        Upload une vidéo
-        """
-        try:
-            # Récupérer la taille de la vidéo
-            async with httpx.AsyncClient() as client:
-                head_response = await client.head(video_url)
-                file_size = int(head_response.headers.get("content-length", 0))
-                
-                if file_size == 0:
-                    logger.error("Taille vidéo inconnue")
-                    return None
-                
-                # Start upload session
-                start_data = {
-                    "upload_phase": "start",
-                    "file_size": file_size,
-                    "access_token": access_token
-                }
-                
-                start_response = await self.make_request(
-                    "POST",
-                    f"{page_id}/videos",
-                    data=start_data
-                )
-                
-                video_id = start_response.get("video_id")
-                upload_session_id = start_response.get("upload_session_id")
-                start_offset = start_response.get("start_offset", 0)
-                end_offset = start_response.get("end_offset", file_size)
-                
-                if not video_id:
-                    return None
-                
-                # Transfert en chunks
-                chunk_size = 4 * 1024 * 1024  # 4MB
-                current_offset = start_offset
-                
-                while current_offset < end_offset:
-                    # Télécharger le chunk
-                    headers = {
-                        "Range": f"bytes={current_offset}-{min(current_offset + chunk_size - 1, end_offset - 1)}"
-                    }
-                    
-                    chunk_response = await client.get(video_url, headers=headers)
-                    chunk_response.raise_for_status()
-                    
-                    # Upload le chunk
-                    transfer_data = {
-                        "upload_phase": "transfer",
-                        "upload_session_id": upload_session_id,
-                        "start_offset": current_offset,
-                        "access_token": access_token
-                    }
-                    
-                    files = {
-                        "video_file_chunk": chunk_response.content
-                    }
-                    
-                    await self.client.post(
-                        f"{self.BASE_URL}/{video_id}",
-                        data=transfer_data,
-                        files=files
-                    )
-                    
-                    current_offset += chunk_size
-                
-                # Finir l'upload
-                finish_data = {
-                    "upload_phase": "finish",
-                    "upload_session_id": upload_session_id,
-                    "access_token": access_token
-                }
-                
-                if title:
-                    finish_data["title"] = title
-                if description:
-                    finish_data["description"] = description
-                
-                finish_data["published"] = published
-                
-                await self.make_request(
-                    "POST",
-                    str(video_id),
-                    data=finish_data
-                )
-                
-                return video_id
-                
-        except Exception as e:
-            logger.error(f"Erreur upload vidéo: {e}")
-            return None
-    
-    # ==================== WEBHOOK SUBSCRIPTION ====================
-    
-    async def subscribe_to_webhooks(
-        self,
-        page_id: str,
-        access_token: str,
-        subscribed_fields: List[str],
-        callback_url: str
-    ) -> Dict:
-        """
-        Souscrit une page aux webhooks
-        """
-        return await self.make_request(
-            "POST",
-            f"{page_id}/subscribed_apps",
-            params={"access_token": access_token},
-            data={
-                "subscribed_fields": ",".join(subscribed_fields),
-                "callback_url": callback_url
+            logger.error(f"❌ Erreur sync_page_data: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "page_id": page_id,
+                "posts": [],
+                "total_posts": 0,
+                "total_comments": 0
             }
-        )
+
+
+# 🔥 Instance singleton
+try:
+    # Créer l'instance
+    facebook_graph_service = FacebookGraphAPIService(api_version="v18.0", timeout=30)
     
-    async def unsubscribe_from_webhooks(
-        self,
-        page_id: str,
-        access_token: str
-    ) -> Dict:
-        """
-        Désouscrit une page des webhooks
-        """
-        return await self.make_request(
-            "DELETE",
-            f"{page_id}/subscribed_apps",
-            params={"access_token": access_token}
-        )
+    # Alias
+    facebook_graph_api = facebook_graph_service
     
-    async def get_webhook_subscriptions(
-        self,
-        page_id: str,
-        access_token: str
-    ) -> List[Dict]:
-        """
-        Récupère les subscriptions webhook d'une page
-        """
-        result = await self.make_request(
-            "GET",
-            f"{page_id}/subscribed_apps",
-            params={
-                "fields": "subscribed_fields,callback_url",
-                "access_token": access_token
+    logger.info("✅ FacebookGraphAPIService initialisé avec succès")
+    
+except Exception as e:
+    logger.critical(f"💥 Échec initialisation FacebookGraphAPIService: {e}")
+    
+    # Service dégradé pour éviter les crashs
+    class DegradedFacebookGraphAPI:
+        def __init__(self):
+            self.base_url = "NOT_CONFIGURED"
+            logger.warning("⚠️ FacebookGraphAPI en mode dégradé")
+        
+        async def get_page_posts(self, *args, **kwargs):
+            logger.error("❌ FacebookGraphAPI non configuré")
+            return [], {}
+        
+        async def get_post_comments(self, *args, **kwargs):
+            logger.error("❌ FacebookGraphAPI non configuré")
+            return [], {}
+        
+        async def sync_page_data(self, *args, **kwargs):
+            return {
+                "success": False,
+                "error": "Service non configuré",
+                "posts": [],
+                "total_posts": 0,
+                "total_comments": 0
             }
-        )
-        return result.get("data", [])
-    
-    # ==================== BATCH REQUESTS ====================
-    
-    async def make_batch_request(
-        self,
-        requests: List[Dict],
-        access_token: str,
-        include_headers: bool = False
-    ) -> List[Dict]:
-        """
-        Fait plusieurs requêtes en batch
-        """
-        batch = []
-        for i, req in enumerate(requests):
-            batch_request = {
-                "method": req.get("method", "GET"),
-                "relative_url": req["relative_url"],
-                "name": req.get("name", f"request_{i}"),
-                "omit_response_on_success": req.get("omit_response_on_success", False)
+        
+        async def subscribe_to_webhooks(self, *args, **kwargs):
+            return {
+                "success": False,
+                "error": "Service non configuré"
             }
-            
-            if "body" in req:
-                batch_request["body"] = urlencode(req["body"])
-            
-            batch.append(batch_request)
         
-        data = {
-            "batch": json.dumps(batch),
-            "include_headers": include_headers,
-            "access_token": access_token
-        }
+        async def close(self):
+            pass
         
-        result = await self.make_request(
-            "POST",
-            "",
-            data=data
-        )
+        async def __aenter__(self):
+            return self
         
-        return result
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            await self.close()
     
-    # ==================== ANALYTICS & INSIGHTS ====================
-    
-    async def get_page_analytics(
-        self,
-        page_id: str,
-        access_token: str,
-        metric: str = "page_impressions,page_engaged_users",
-        period: str = "day",
-        date_preset: str = "last_28d"
-    ) -> List[Dict]:
-        """
-        Récupère les analytics de page
-        """
-        return await self.make_request(
-            "GET",
-            f"{page_id}/insights",
-            params={
-                "metric": metric,
-                "period": period,
-                "date_preset": date_preset,
-                "access_token": access_token
-            }
-        )
-    
-    async def get_post_analytics(
-        self,
-        post_id: str,
-        access_token: str,
-        metric: str = "post_impressions,post_engaged_users"
-    ) -> List[Dict]:
-        """
-        Récupère les analytics d'un post
-        """
-        return await self.make_request(
-            "GET",
-            f"{post_id}/insights",
-            params={
-                "metric": metric,
-                "access_token": access_token
-            }
-        )
-    
-    async def get_audience_insights(
-        self,
-        page_id: str,
-        access_token: str
-    ) -> Dict:
-        """
-        Récupère les insights audience
-        """
-        result = await self.make_request(
-            "GET",
-            f"{page_id}/insights",
-            params={
-                "metric": "page_fans,page_fans_city,page_fans_country,"
-                         "page_fans_gender_age,page_fans_locale",
-                "period": "lifetime",
-                "access_token": access_token
-            }
-        )
-        
-        insights = {}
-        for item in result.get("data", []):
-            insights[item["name"]] = item.get("values", [])
-        
-        return insights
-    
-    # ==================== UTILITIES ====================
-    
-    async def get_app_info(self, app_id: str, app_secret: str) -> Dict:
-        """
-        Récupère les infos de l'app Facebook
-        """
-        return await self.make_request(
-            "GET",
-            f"{app_id}",
-            params={
-                "fields": "id,name,description,category,company,"
-                         "platform,ios_bundle_id,android_key_hash,"
-                         "webhooks,app_domains,contact_email",
-                "access_token": f"{app_id}|{app_secret}"
-            }
-        )
-    
-    async def test_api_connection(self, access_token: str) -> bool:
-        """
-        Teste la connexion à l'API
-        """
-        try:
-            await self.get_user_info(access_token)
-            return True
-        except:
-            return False
-    
-    async def rate_limit_info(self, access_token: str) -> Dict:
-        """
-        Récupère les infos de rate limit
-        """
-        headers = {
-            "X-App-Usage": "1",
-            "X-Page-Usage": "1",
-            "X-Business-Use-Case-Usage": "1"
-        }
-        
-        result = await self.make_request(
-            "GET",
-            "me",
-            params={"access_token": access_token},
-            headers=headers
-        )
-        
-        usage = {}
-        for header_name in ["X-App-Usage", "X-Page-Usage", "X-Business-Use-Case-Usage"]:
-            if header_name in self.client._transport._pool._connections[0]._response.headers:
-                usage[header_name] = self.client._transport._pool._connections[0]._response.headers[header_name]
-        
-        return {
-            "user_info": result,
-            "rate_limits": usage
-        }
+    facebook_graph_service = DegradedFacebookGraphAPI()
+    facebook_graph_api = facebook_graph_service

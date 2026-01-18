@@ -7,6 +7,8 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from app.api.v1.endpoints import orders
+from app.api.v1.endpoints import facebook_auto_reply, facebook_messenger  # AJOUT: Import du module facebook_messenger
 
 # Configuration du logging
 logging.basicConfig(
@@ -50,6 +52,7 @@ try:
     from app.models.seller import Seller
     from app.models.driver_model import Driver
     from app.models.product import Product
+    from app.models.order import Order, OrderItem
     
     # Importez les modèles Facebook
     from app.models.facebook import (
@@ -77,7 +80,7 @@ except Exception as e:
 app = FastAPI(
     title="Live Commerce API",
     description="Système complet de commerce avec génération automatique de codes produits et intégration Facebook avancée",
-    version="3.0.0",  # ⭐ MIS À JOUR: Version 3.0 avec nouvelles fonctionnalités
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -91,22 +94,22 @@ app = FastAPI(
     }
 )
 
-# ⭐ AMÉLIORATION: CORS avec liste dynamique
+# CORS configuration
 from app.core.config import settings
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:53514",  # Ton origine Flutter Web
-        "http://localhost:*",       # Tous les ports locaux
+        "http://localhost:53514",
+        "http://localhost:*",
         "http://127.0.0.1:*",
-        "*"                         # En développement seulement
+        "*"
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
-    max_age=600,  # Cache les pré-vérifications CORS pendant 10 minutes
+    max_age=600,
 )
 
 # ================================
@@ -118,20 +121,28 @@ print("="*50)
 
 services_loaded = {}
 
+# Service NLP
 try:
-    # Initialiser le service NLP
-    from app.services.nlp_service import NLPService
-    nlp_service = NLPService()
-    services_loaded["nlp"] = True
-    print(f"✅ Service NLP → Initialisé")
-    logger.info("Service NLP initialisé avec succès")
+    from app.services import nlp_service
+    if nlp_service:
+        services_loaded["nlp"] = True
+        print(f"✅ Service NLP → Initialisé")
+        logger.info("Service NLP initialisé avec succès")
+    else:
+        services_loaded["nlp"] = False
+        print(f"⚠️  Service NLP: Non initialisé (configuration manquante)")
+        logger.warning("Service NLP non initialisé")
+except ImportError as e:
+    print(f"⚠️  Service NLP: Module non trouvé - {e}")
+    services_loaded["nlp"] = False
+    logger.warning(f"Service NLP non initialisé: Module non trouvé: {e}")
 except Exception as e:
-    print(f"⚠️  Service NLP: {e}")
+    print(f"⚠️  Service NLP: Erreur d'initialisation - {e}")
     services_loaded["nlp"] = False
     logger.warning(f"Service NLP non initialisé: {e}")
 
+# Service Facebook Graph API
 try:
-    # Initialiser le service Facebook Graph API
     from app.services.facebook_graph_api import FacebookGraphAPIService
     facebook_graph_service = FacebookGraphAPIService()
     services_loaded["facebook_graph"] = True
@@ -142,8 +153,8 @@ except Exception as e:
     services_loaded["facebook_graph"] = False
     logger.warning(f"Service Facebook Graph API non initialisé: {e}")
 
+# Service Facebook Webhook
 try:
-    # Initialiser le service Facebook Webhook
     from app.services.facebook_webhook import FacebookWebhookService
     facebook_webhook_service = FacebookWebhookService()
     services_loaded["facebook_webhook"] = True
@@ -153,6 +164,26 @@ except Exception as e:
     print(f"⚠️  Facebook Webhook: {e}")
     services_loaded["facebook_webhook"] = False
     logger.warning(f"Service Facebook Webhook non initialisé: {e}")
+
+# Service OCR
+try:
+    from app.services.ocr_service import OCRService
+    ocr_config = {
+        "OCR_ENGINE": "paddleocr",
+        "PADDLE_OCR_LANGS": ["fr", "en", "mg"],
+        "MAX_CONCURRENT_OCR": 4,
+        "OCR_TIMEOUT": 30
+    }
+    services_loaded["ocr"] = True
+    print(f"✅ Service OCR → Initialisé")
+    logger.info("Service OCR initialisé avec succès")
+except ImportError:
+    print(f"⚠️  Service OCR: Module non trouvé (optionnel)")
+    services_loaded["ocr"] = False
+except Exception as e:
+    print(f"⚠️  Service OCR: Erreur d'initialisation - {e}")
+    services_loaded["ocr"] = False
+    logger.warning(f"Service OCR non initialisé: {e}")
 
 print("="*50)
 print(f"✅ Services chargés: {sum(services_loaded.values())}/{len(services_loaded)}")
@@ -167,7 +198,66 @@ print("="*50)
 # Dictionnaire pour suivre les routeurs chargés
 loaded_routers = {}
 
-# Chargement simple et direct
+# ===== ROUTER ORDERS (NOUVEAU) =====
+try:
+    # Inclure le routeur orders
+    app.include_router(
+        orders.router,
+        prefix="/api/v1",
+        tags=["orders"]
+    )
+    loaded_routers["orders"] = "/api/v1"
+    print(f"✅ Orders → /api/v1/orders")
+    print(f"   🛒 Gestion complète des commandes")
+    print(f"   📊 Statistiques et rapports")
+    print(f"   🤖 Intégration Facebook automatique")
+    logger.info("Routeur Orders chargé avec succès")
+except Exception as e:
+    print(f"❌ Orders: {e}")
+    logger.error(f"Échec chargement Orders: {e}")
+
+# ===== ROUTER FACEBOOK AUTO REPLY =====
+try:
+    app.include_router(
+        facebook_auto_reply.router,
+        prefix="/api/v1",
+        tags=["facebook-auto-reply"]
+    )
+    loaded_routers["facebook_auto_reply"] = "/api/v1"
+    print(f"✅ Facebook Auto Reply → /api/v1/facebook/auto-reply")
+    print(f"   🤖 Réponses automatiques IA")
+    print(f"   💬 Gestion des commentaires")
+    print(f"   📊 Analytics de performance")
+    logger.info("Routeur Facebook Auto Reply chargé avec succès")
+except ImportError as e:
+    print(f"⚠️  Facebook Auto Reply: Module non trouvé - {e}")
+    logger.warning(f"Module Facebook Auto Reply non trouvé: {e}")
+except Exception as e:
+    print(f"❌ Facebook Auto Reply: {e}")
+    logger.error(f"Échec chargement Facebook Auto Reply: {e}")
+
+# ===== ROUTER FACEBOOK MESSENGER =====
+try:
+    app.include_router(
+        facebook_messenger.router,
+        prefix="/api/v1",
+        tags=["facebook-messenger"]
+    )
+    loaded_routers["facebook_messenger"] = "/api/v1"
+    print(f"✅ Facebook Messenger → /api/v1/facebook/messenger")
+    print(f"   💬 Gestion des messages privés")
+    print(f"   📨 Webhook Messenger")
+    print(f"   🔄 Traitement automatisé")
+    print(f"   📊 Historique des messages")
+    logger.info("Routeur Facebook Messenger chargé avec succès")
+except ImportError as e:
+    print(f"⚠️  Facebook Messenger: Module non trouvé - {e}")
+    logger.warning(f"Module Facebook Messenger non trouvé: {e}")
+except Exception as e:
+    print(f"❌ Facebook Messenger: {e}")
+    logger.error(f"Échec chargement Facebook Messenger: {e}")
+
+# Routeur Authentication
 try:
     from app.routers.auth_router import router as auth_router
     app.include_router(auth_router)
@@ -178,6 +268,7 @@ except Exception as e:
     print(f"❌ Authentication: {e}")
     logger.error(f"Échec chargement authentification: {e}")
 
+# Routeur Drivers
 try:
     from app.routers.drivers import router as drivers_router
     app.include_router(drivers_router)
@@ -188,6 +279,7 @@ except Exception as e:
     print(f"❌ Drivers: {e}")
     logger.error(f"Échec chargement drivers: {e}")
 
+# Routeur Products
 try:
     from app.routers.product import router as product_router
     app.include_router(product_router)
@@ -198,6 +290,36 @@ try:
 except Exception as e:
     print(f"❌ Products: {e}")
     logger.error(f"Échec chargement produits: {e}")
+
+# Routeur OCR
+try:
+    from app.api.endpoints.ocr import router as ocr_router
+    app.include_router(ocr_router)
+    loaded_routers["ocr"] = ocr_router.prefix
+    print(f"✅ OCR/NLP → {ocr_router.prefix}")
+    print(f"   📷 Image OCR")
+    print(f"   📄 PDF OCR")
+    print(f"   📝 Document OCR")
+    print(f"   📊 Excel OCR")
+    print(f"   📋 Form processing")
+    print(f"   🛒 Order extraction")
+    logger.info(f"Routeur OCR/NLP chargé: {ocr_router.prefix}")
+except ImportError as e:
+    print(f"⚠️  OCR/NLP: Module non trouvé - {e}")
+    logger.warning(f"Module OCR/NLP non trouvé: {e}")
+except AttributeError as e:
+    print(f"⚠️  OCR/NLP: Routeur mal configuré - {e}")
+    logger.error(f"Routeur OCR/NLP mal configuré: {e}")
+except Exception as e:
+    print(f"⚠️  OCR/NLP: Erreur de chargement - {e}")
+    logger.error(f"Échec chargement OCR/NLP: {e}")
+    from fastapi import APIRouter, HTTPException
+    fallback_router = APIRouter()
+    @fallback_router.get("/", include_in_schema=False)
+    async def ocr_unavailable():
+        raise HTTPException(status_code=503, detail="Le service OCR est temporairement indisponible.")
+    app.include_router(fallback_router, prefix="/ocr", tags=["OCR"])
+    logger.info("Routeur de secours OCR créé (service indisponible).")
 
 # ================================
 #   ROUTES FACEBOOK COMPLÈTES
@@ -210,17 +332,12 @@ facebook_loaded = False
 facebook_routes_count = 0
 
 try:
-    # Import des routes Facebook complètes
     from app.api.v1.endpoints.facebook import router as facebook_router
-    
-    # Inclure le routeur Facebook avec toutes les nouvelles routes
     app.include_router(
         facebook_router,
         prefix="/api/v1/facebook",
         tags=["facebook"]
     )
-    
-    # Compter les routes Facebook
     facebook_routes_count = len(facebook_router.routes)
     loaded_routers["facebook"] = "/api/v1/facebook"
     facebook_loaded = True
@@ -328,7 +445,6 @@ async def root():
     from app.db import engine
     from sqlalchemy import text
     
-    # Vérifier la connexion DB
     db_status = "connected"
     try:
         with engine.connect() as conn:
@@ -372,6 +488,9 @@ async def root():
             "authentication": "active" if "auth" in loaded_routers else "inactive",
             "products": "active" if "products" in loaded_routers else "inactive",
             "drivers": "active" if "drivers" in loaded_routers else "inactive",
+            "orders": "active" if "orders" in loaded_routers else "inactive",
+            "facebook_auto_reply": "active" if "facebook_auto_reply" in loaded_routers else "inactive",
+            "facebook_messenger": "active" if "facebook_messenger" in loaded_routers else "inactive",
             "facebook": {
                 "integration": "active" if facebook_loaded else "inactive",
                 "webhook": "active" if services_loaded.get("facebook_webhook") else "inactive",
@@ -400,7 +519,6 @@ async def health_check():
         "dependencies": {}
     }
     
-    # 1. Vérification base de données
     try:
         with engine.connect() as conn:
             result = conn.execute(text("SELECT 1 as status, version() as version"))
@@ -417,16 +535,12 @@ async def health_check():
             "error": str(e)
         }
     
-    # 2. Vérification services
     health_status["services"] = services_loaded
-    
-    # 3. Vérification modules
     health_status["modules"] = {
         **loaded_routers,
         **additional_routers
     }
     
-    # 4. Métriques système
     health_status["system"] = {
         "platform": platform.platform(),
         "python_version": platform.python_version(),
@@ -435,7 +549,6 @@ async def health_check():
         "disk_usage": f"{psutil.disk_usage('/').percent}%"
     }
     
-    # 5. Uptime
     if 'app_start_time' in globals():
         uptime = datetime.now() - app_start_time
         health_status["uptime"] = {
@@ -462,19 +575,16 @@ async def detailed_status():
         "features": {}
     }
     
-    # Test de performance DB
     try:
         start_time = time.time()
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        db_latency = (time.time() - start_time) * 1000  # ms
-        
+        db_latency = (time.time() - start_time) * 1000
         status["performance"]["database_latency_ms"] = round(db_latency, 2)
         status["connections"]["database"] = "healthy"
     except Exception as e:
         status["connections"]["database"] = f"unhealthy: {str(e)}"
     
-    # Facebook API status
     if facebook_loaded:
         status["features"]["facebook"] = {
             "integration": "active",
@@ -486,7 +596,6 @@ async def detailed_status():
     else:
         status["features"]["facebook"] = {"integration": "inactive"}
     
-    # Services status
     active_services = sum(services_loaded.values())
     total_services = len(services_loaded)
     status["services"] = {
@@ -497,7 +606,6 @@ async def detailed_status():
     
     return status
 
-# Endpoint pour vérifier l'intégration Facebook
 @app.get("/api/facebook/status", tags=["Facebook"], response_model=dict)
 async def facebook_status():
     """Statut détaillé de l'intégration Facebook"""
@@ -561,7 +669,6 @@ async def facebook_status():
     
     return status
 
-# ⭐ NOUVEAU: Endpoint de débogage système avancé
 @app.get("/api/system/debug", tags=["System"], include_in_schema=False)
 async def system_debug():
     """Endpoint de débogage système avancé (non inclus dans la documentation)"""
@@ -571,7 +678,6 @@ async def system_debug():
     import threading
     import gc
     
-    # Informations système détaillées
     system_info = {
         "platform": platform.platform(),
         "system": platform.system(),
@@ -583,7 +689,6 @@ async def system_debug():
         "python_implementation": platform.python_implementation()
     }
     
-    # Ressources système
     resources = {
         "cpu": {
             "cores": psutil.cpu_count(logical=False),
@@ -605,7 +710,6 @@ async def system_debug():
         }
     }
     
-    # Processus
     process = psutil.Process()
     process_info = {
         "pid": process.pid,
@@ -620,21 +724,18 @@ async def system_debug():
         "connections": len(process.connections())
     }
     
-    # Threads actifs
     threads = threading.enumerate()
     thread_info = {
         "count": len(threads),
         "names": [t.name for t in threads]
     }
     
-    # Garbage collector
     gc_info = {
         "enabled": gc.isenabled(),
         "threshold": gc.get_threshold(),
         "count": gc.get_count()
     }
     
-    # Application info
     app_info = {
         "loaded_routers": loaded_routers,
         "additional_routers": additional_routers,
@@ -645,7 +746,6 @@ async def system_debug():
         "start_time": app_start_time.isoformat() if 'app_start_time' in globals() else None
     }
     
-    # Réseau
     network_info = {
         "hostname": socket.gethostname(),
         "ip": socket.gethostbyname(socket.gethostname()),
@@ -663,7 +763,6 @@ async def system_debug():
         "network": network_info
     }
 
-# ⭐ NOUVEAU: Endpoint de métriques pour monitoring
 @app.get("/api/metrics", tags=["Metrics"], include_in_schema=False)
 async def get_metrics():
     """Endpoint Prometheus-style pour le monitoring"""
@@ -671,48 +770,69 @@ async def get_metrics():
     
     metrics = []
     
-    # CPU
     cpu_percent = psutil.cpu_percent(interval=1)
     metrics.append(f"cpu_usage_percent {cpu_percent}")
     
-    # Mémoire
     memory = psutil.virtual_memory()
     metrics.append(f"memory_total_bytes {memory.total}")
     metrics.append(f"memory_available_bytes {memory.available}")
     metrics.append(f"memory_used_bytes {memory.used}")
     metrics.append(f"memory_usage_percent {memory.percent}")
     
-    # Disk
     disk = psutil.disk_usage('/')
     metrics.append(f"disk_total_bytes {disk.total}")
     metrics.append(f"disk_used_bytes {disk.used}")
     metrics.append(f"disk_free_bytes {disk.free}")
     metrics.append(f"disk_usage_percent {disk.percent}")
     
-    # Process
     process = psutil.Process()
     metrics.append(f"process_cpu_percent {process.cpu_percent()}")
     metrics.append(f"process_memory_rss_bytes {process.memory_info().rss}")
     metrics.append(f"process_memory_vms_bytes {process.memory_info().vms}")
     metrics.append(f"process_thread_count {process.num_threads()}")
     
-    # Application metrics
     metrics.append(f"app_routers_loaded {len(loaded_routers)}")
     metrics.append(f"app_facebook_loaded {1 if facebook_loaded else 0}")
     metrics.append(f"app_facebook_routes {facebook_routes_count}")
     
-    # Timestamp
     metrics.append(f"app_timestamp {int(datetime.now().timestamp())}")
     
+    from fastapi.responses import Response
     return Response(
         content="\n".join(metrics),
         media_type="text/plain"
     )
 
-from fastapi.responses import Response
+@app.get("/api/ocr/status", tags=["OCR"], response_model=dict)
+async def ocr_status():
+    """Statut détaillé de l'intégration OCR/NLP"""
+    status = {
+        "ocr_integration": "active" if "ocr" in loaded_routers else "inactive",
+        "nlp_integration": "active" if services_loaded.get("nlp") else "inactive",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {}
+    }
+    
+    if "ocr" in loaded_routers:
+        prefix = loaded_routers.get('ocr', '/api/ocr')
+        status["endpoints"] = {
+            "health": f"{prefix}/health",
+            "metrics": f"{prefix}/metrics",
+            "auto_ocr": f"{prefix}/auto",
+            "image_ocr": f"{prefix}/image",
+            "pdf_ocr": f"{prefix}/pdf",
+            "docx_ocr": f"{prefix}/docx",
+            "excel_ocr": f"{prefix}/excel",
+            "batch_ocr": f"{prefix}/batch",
+            "text_processing": f"{prefix}/text",
+            "form_extraction": f"{prefix}/form",
+            "order_building": f"{prefix}/order"
+        }
+    
+    return status
 
 # ================================
-#   MIDDLEWARE PERSONNALISÉ AMÉLIORÉ
+#   MIDDLEWARE PERSONNALISÉ
 # ================================
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -723,7 +843,6 @@ async def log_requests(request, call_next):
     start_time = time.time()
     request_id = f"req_{int(start_time * 1000)}_{hash(request.url.path) % 10000}"
     
-    # Log de la requête entrante
     logger.info(
         f"[{request_id}] IN  Method={request.method} "
         f"Path={request.url.path} "
@@ -735,14 +854,12 @@ async def log_requests(request, call_next):
         response = await call_next(request)
         process_time = (time.time() - start_time) * 1000
         
-        # Log de la réponse
         logger.info(
             f"[{request_id}] OUT Status={response.status_code} "
             f"Duration={process_time:.2f}ms "
             f"Size={response.headers.get('content-length', 'unknown')}b"
         )
         
-        # Ajouter des headers de tracing
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Process-Time"] = f"{process_time:.2f}ms"
         
@@ -758,7 +875,7 @@ async def log_requests(request, call_next):
         raise
 
 # ================================
-#   GESTION DES ERREURS AMÉLIORÉE
+#   GESTION DES ERREURS
 # ================================
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -816,7 +933,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         f"Path={request.url.path}\n{error_trace}"
     )
     
-    # En production, ne pas exposer les détails de l'erreur
     error_detail = str(exc) if os.getenv("ENVIRONMENT") == "development" else "Internal server error"
     
     return JSONResponse(
@@ -842,9 +958,6 @@ async def startup_event():
     logger.info(f"🌐 Environnement: {os.getenv('ENVIRONMENT', 'production')}")
     logger.info(f"🔗 URL Base: http://localhost:8000")
     
-    # Initialiser les connexions aux services externes si besoin
-    # Exemple: connexion Redis, RabbitMQ, etc.
-    
     global app_start_time
     app_start_time = datetime.now()
     logger.info(f"⏰ Heure de démarrage: {app_start_time.isoformat()}")
@@ -854,11 +967,9 @@ async def shutdown_event():
     """Événement d'arrêt de l'application"""
     logger.info("🛑 Application Live Commerce API arrêtée")
     
-    # Fermer les connexions aux services externes
     if services_loaded.get("facebook_graph"):
         try:
             from app.services.facebook_graph_api import FacebookGraphAPIService
-            # Fermer les clients HTTP
             pass
         except:
             pass
@@ -874,7 +985,18 @@ print(f"\n📍 SYSTÈMES ACTIFS:")
 print(f"   🔐 Authentication: /auth")
 print(f"   🚚 Drivers:       /api/v1/drivers")
 print(f"   🛒 Products:      /products")
+print(f"   📦 Orders:        /api/v1/orders")
+print(f"   🤖 Facebook Auto Reply: /api/v1/facebook/auto-reply")
+print(f"   💬 Facebook Messenger: /api/v1/facebook/messenger")
 print(f"   📱 Facebook:      /api/v1/facebook ({facebook_routes_count} routes)")
+
+print(f"\n🆕 NOUVELLES FONCTIONNALITÉS COMMANDES:")
+print(f"   • Création automatique depuis Facebook")
+print(f"   • Gestion des statuts (pending, preparing, delivering, done)")
+print(f"   • Items de commande avec produits")
+print(f"   • Confirmation via Messenger")
+print(f"   • Statistiques et rapports")
+print(f"   • Filtrage et recherche avancée")
 
 print(f"\n🆕 NOUVELLES FONCTIONNALITÉS FACEBOOK:")
 print(f"   • Webhook Stream en temps réel")
@@ -884,6 +1006,20 @@ print(f"   • Gestion complète des messages")
 print(f"   • Export des données")
 print(f"   • Synchronisation périodique")
 print(f"   • Notifications push")
+
+print(f"\n🆕 NOUVELLES FONCTIONNALITÉS OCR/NLP:")
+print(f"   • OCR Image, PDF, DOCX, Excel")
+print(f"   • Détection automatique de langues")
+print(f"   • Extraction de formulaires")
+print(f"   • Construction automatique de commandes")
+print(f"   • Traitement par lots (batch)")
+
+print(f"\n🤖 NOUVELLES FONCTIONNALITÉS AUTO REPLY:")
+print(f"   • Réponses automatiques IA")
+print(f"   • Gestion intelligente des commentaires")
+print(f"   • Analytics de performance")
+print(f"   • Personnalisation des réponses")
+print(f"   • Apprentissage automatique")
 
 print(f"\n📊 SERVICES:")
 for service, loaded in services_loaded.items():
@@ -907,6 +1043,9 @@ print(f"\n🔗 TEST RAPIDE:")
 print(f"   Health:       curl http://localhost:8000/health")
 print(f"   Status:       curl http://localhost:8000/status")
 print(f"   Products:     curl http://localhost:8000/products/")
+print(f"   Orders:       curl http://localhost:8000/api/v1/orders")
+print(f"   Facebook Auto Reply: curl http://localhost:8000/api/v1/facebook/auto-reply")
+print(f"   Facebook Messenger: curl http://localhost:8000/api/v1/facebook/messenger")
 print(f"   System:       curl http://localhost:8000/api/system/debug")
 print(f"   Metrics:      curl http://localhost:8000/api/metrics")
 
@@ -915,6 +1054,15 @@ print(f"   URL:          http://localhost:8000/api/v1/facebook/webhook")
 print(f"   Subscribe:    curl -X POST http://localhost:8000/api/v1/facebook/webhook/subscribe")
 print(f"   Stream:       curl http://localhost:8000/api/v1/facebook/webhook/stream")
 print(f"   Health:       curl http://localhost:8000/api/v1/facebook/webhook/health")
+
+print(f"\n🔗 ENDPOINTS OCR/NLP:")
+if "ocr" in loaded_routers:
+    prefix = loaded_routers.get('ocr', '/api/ocr')
+    print(f"   Auto OCR:     curl -X POST http://localhost:8000{prefix}/auto")
+    print(f"   Image OCR:    curl -X POST http://localhost:8000{prefix}/image")
+    print(f"   PDF OCR:      curl -X POST http://localhost:8000{prefix}/pdf")
+    print(f"   Form OCR:     curl -X POST http://localhost:8000{prefix}/form")
+    print(f"   Batch OCR:    curl -X POST http://localhost:8000{prefix}/batch")
 
 print("\n📊 LOGGING:")
 print(f"   • Fichier de log: app.log")
@@ -936,7 +1084,6 @@ print("="*70)
 app_start_time = datetime.now()
 
 if __name__ == "__main__":
-    # Configuration pour la production
     uvicorn_config = {
         "app": "app.main:app",
         "host": "0.0.0.0",

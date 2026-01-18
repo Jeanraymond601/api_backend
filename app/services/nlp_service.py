@@ -1,749 +1,284 @@
-# app/services/nlp_service.py
 import re
-import json
+import time
+from typing import List, Optional, Dict, Any, Tuple
 import logging
-from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime
-import numpy as np
-from collections import Counter
-import spacy
-from textblob import TextBlob
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-import string
-from dataclasses import dataclass
-from enum import Enum
-
-# Télécharger les ressources NLTK si besoin
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-    nltk.download('stopwords')
-    nltk.download('wordnet')
-    nltk.download('averaged_perceptron_tagger')
+from langdetect import detect, DetectorFactory
+from langdetect.lang_detect_exception import LangDetectException
 
 logger = logging.getLogger(__name__)
 
-class IntentType(Enum):
-    """Types d'intentions détectées"""
-    QUESTION = "question"
-    COMPLAINT = "complaint"
-    COMPLIMENT = "compliment"
-    ORDER = "order"
-    INQUIRY = "inquiry"
-    SUPPORT = "support"
-    PRICE = "price"
-    AVAILABILITY = "availability"
-    DELIVERY = "delivery"
-    REFUND = "refund"
-    OTHER = "other"
-
-class SentimentType(Enum):
-    """Types de sentiment"""
-    POSITIVE = "positive"
-    NEUTRAL = "neutral"
-    NEGATIVE = "negative"
-
-class PriorityLevel(Enum):
-    """Niveaux de priorité"""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    URGENT = "urgent"
-
-@dataclass
-class NLPResult:
-    """Résultat d'analyse NLP"""
-    text: str
-    intent: IntentType
-    sentiment: SentimentType
-    confidence: float
-    entities: List[Dict[str, Any]]
-    keywords: List[str]
-    priority: PriorityLevel
-    categories: List[str]
-    language: str
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convertit en dictionnaire"""
-        return {
-            "text": self.text,
-            "intent": self.intent.value,
-            "sentiment": self.sentiment.value,
-            "confidence": round(self.confidence, 3),
-            "entities": self.entities,
-            "keywords": self.keywords,
-            "priority": self.priority.value,
-            "categories": self.categories,
-            "language": self.language
-        }
-
 class NLPService:
-    """
-    Service NLP pour analyser les commentaires et messages Facebook
-    """
-    
-    def __init__(self, model_name: str = "fr_core_news_sm"):
-        """
-        Initialise le service NLP
-        """
-        self.logger = logging.getLogger(__name__)
+    def __init__(self, config):
+        self.config = config
+        self.phone_patterns = config.get("NER_PHONE_PATTERNS", [])
+        self.email_pattern = config.get("NER_EMAIL_PATTERN")
+        self.price_pattern = config.get("NER_PRICE_PATTERN")
         
-        # Charger le modèle spaCy
-        try:
-            self.nlp = spacy.load(model_name)
-            self.logger.info(f"✅ Modèle spaCy chargé: {model_name}")
-        except OSError:
-            self.logger.warning(f"Modèle {model_name} non trouvé, téléchargement...")
-            import subprocess
-            subprocess.run(["python", "-m", "spacy", "download", model_name])
-            self.nlp = spacy.load(model_name)
+        # Compile regex patterns
+        self.compiled_phone_patterns = [re.compile(pattern) for pattern in self.phone_patterns]
+        self.compiled_email_pattern = re.compile(self.email_pattern) if self.email_pattern else None
+        self.compiled_price_pattern = re.compile(self.price_pattern) if self.price_pattern else None
         
-        # Initialiser NLTK
-        self.stop_words = set(stopwords.words('french') + stopwords.words('english'))
-        self.lemmatizer = WordNetLemmatizer()
+        # Initialize language detector
+        DetectorFactory.seed = 0
         
-        # Dictionnaires personnalisés
-        self.keyword_patterns = self._load_keyword_patterns()
-        self.entity_patterns = self._load_entity_patterns()
+        # Malagasy specific patterns
+        self.malagasy_cities = [
+            "antananarivo", "tana", "antsirabe", "toamasina", "mahajanga",
+            "fianarantsoa", "toliara", "antsiranana", "moramanga", "ambositra"
+        ]
         
-        # Configuration
-        self.min_confidence = 0.5
-        self.max_keywords = 10
-        
-        self.logger.info("✅ Service NLP initialisé")
-    
-    def _load_keyword_patterns(self) -> Dict[str, List[str]]:
-        """
-        Charge les patterns de mots-clés par catégorie
-        """
-        return {
-            "question": [
-                "combien", "prix", "coûte", "coût", "quel", "quelle", "quand",
-                "comment", "où", "pourquoi", "est-ce que", "?", "how much",
-                "price", "cost", "when", "how", "where", "why"
-            ],
-            "complaint": [
-                "problème", "bug", "erreur", "cassé", "ne marche pas",
-                "défaut", "mauvais", "nul", "horrible", "déçu", "déception",
-                "fâché", "colère", "insatisfait", "réclamation",
-                "problem", "broken", "not working", "defect", "bad",
-                "terrible", "disappointed", "angry", "complaint"
-            ],
-            "compliment": [
-                "super", "génial", "excellent", "parfait", "bravo", "félicitations",
-                "merci", "thanks", "thank you", "awesome", "great", "perfect",
-                "good", "nice", "love", "amazing", "fantastic", "wonderful"
-            ],
-            "order": [
-                "commander", "achat", "acheter", "commande", "panier", "ajouter",
-                "order", "buy", "purchase", "cart", "add to cart", "checkout"
-            ],
-            "inquiry": [
-                "information", "renseignement", "détail", "spécification",
-                "caractéristique", "info", "details", "information", "specs"
-            ],
-            "support": [
-                "aide", "support", "assistance", "service client", "sav",
-                "help", "customer service", "assistance", "support"
-            ],
-            "price": [
-                "prix", "tarif", "coût", "montant", "€", "$", "euro", "dollar",
-                "price", "cost", "amount", "discount", "réduction", "promotion",
-                "solde", "sale", "offre", "offer"
-            ],
-            "availability": [
-                "disponible", "stock", "rupture", "livraison", "délai",
-                "available", "in stock", "out of stock", "delivery", "shipping"
-            ],
-            "delivery": [
-                "livraison", "expédition", "colis", "livrer", "recevoir",
-                "delivery", "shipping", "package", "ship", "receive"
-            ],
-            "refund": [
-                "remboursement", "retour", "échanger", "garantie", "règlement",
-                "refund", "return", "exchange", "warranty", "guarantee"
-            ]
-        }
-    
-    def _load_entity_patterns(self) -> Dict[str, List[Tuple[str, str]]]:
-        """
-        Charge les patterns d'entités pour la reconnaissance
-        """
-        return {
-            "PRODUCT": [
-                (r'\b(iphone|samsung|xiaomi|huawei)\b', 'MARQUE'),
-                (r'\b(\d+)\s*(go|gb|mo)\b', 'STOCKAGE'),
-                (r'\b(noir|blanc|rouge|bleu|vert|or|argent)\b', 'COULEUR'),
-                (r'\b(\d+)\s*(inch|pouces|")\b', 'TAILLE_ECRAN'),
-                (r'\b(\d+)\s*(mp|mégapixels)\b', 'APPAREIL_PHOTO'),
-            ],
-            "PRICE": [
-                (r'\b(\d+[,.]?\d*)\s*[€$]\b', 'MONTANT'),
-                (r'\b(gratuit|free)\b', 'GRATUIT'),
-                (r'\b(promo|promotion|solde|discount|offre)\b', 'PROMOTION'),
-            ],
-            "DATE": [
-                (r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b', 'DATE'),
-                (r'\b(aujourd\'hui|demain|hier|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b', 'JOUR'),
-                (r'\b(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)\b', 'MOIS'),
-            ],
-            "LOCATION": [
-                (r'\b(paris|lyon|marseille|toulouse|nice|nantes|strasbourg|montpellier|bordeaux|lille)\b', 'VILLE_FR'),
-                (r'\b(france|belgique|suisse|canada|espagne|italie|allemagne|portugal)\b', 'PAYS'),
-            ]
-        }
+        logger.info("NLP Service initialized")
     
     def detect_language(self, text: str) -> str:
-        """
-        Détecte la langue du texte
-        """
-        # Simple detection basée sur les mots communs
-        french_words = ['le', 'la', 'les', 'un', 'une', 'des', 'et', 'est']
-        english_words = ['the', 'a', 'an', 'and', 'is', 'are', 'you', 'i']
-        
-        french_count = sum(1 for word in text.lower().split() if word in french_words)
-        english_count = sum(1 for word in text.lower().split() if word in english_words)
-        
-        if french_count > english_count:
-            return 'fr'
-        elif english_count > french_count:
-            return 'en'
-        else:
-            # Analyser avec TextBlob pour plus de précision
-            try:
-                blob = TextBlob(text)
-                return blob.detect_language()
-            except:
-                return 'unknown'
-    
-    def preprocess_text(self, text: str, language: str = 'fr') -> str:
-        """
-        Prétraite le texte pour l'analyse
-        """
-        # Convertir en minuscules
-        text = text.lower()
-        
-        # Supprimer la ponctuation
-        text = text.translate(str.maketrans('', '', string.punctuation))
-        
-        # Tokenization
-        tokens = word_tokenize(text, language='french' if language == 'fr' else 'english')
-        
-        # Supprimer les stop words
-        tokens = [word for word in tokens if word not in self.stop_words]
-        
-        # Lemmatization
-        tokens = [self.lemmatizer.lemmatize(word) for word in tokens]
-        
-        return ' '.join(tokens)
-    
-    def extract_keywords(self, text: str, max_keywords: int = 10) -> List[str]:
-        """
-        Extrait les mots-clés du texte
-        """
-        # Tokenization
-        tokens = word_tokenize(text.lower())
-        
-        # Supprimer les stop words et ponctuation
-        tokens = [word for word in tokens 
-                 if word not in self.stop_words 
-                 and word not in string.punctuation]
-        
-        # Calculer la fréquence
-        word_freq = Counter(tokens)
-        
-        # Récupérer les mots les plus fréquents
-        keywords = [word for word, freq in word_freq.most_common(max_keywords)]
-        
-        return keywords
-    
-    def detect_entities(self, text: str) -> List[Dict[str, Any]]:
-        """
-        Détecte les entités nommées dans le texte
-        """
-        entities = []
-        
-        # Utiliser spaCy pour les entités standard
-        doc = self.nlp(text)
-        for ent in doc.ents:
-            entities.append({
-                "text": ent.text,
-                "label": ent.label_,
-                "start": ent.start_char,
-                "end": ent.end_char,
-                "confidence": 0.8  # Estimation
-            })
-        
-        # Ajouter les entités personnalisées via regex
-        for entity_type, patterns in self.entity_patterns.items():
-            for pattern, label in patterns:
-                matches = re.finditer(pattern, text, re.IGNORECASE)
-                for match in matches:
-                    entities.append({
-                        "text": match.group(),
-                        "label": label,
-                        "start": match.start(),
-                        "end": match.end(),
-                        "entity_type": entity_type,
-                        "confidence": 0.7
-                    })
-        
-        return entities
-    
-    def analyze_sentiment(self, text: str) -> Tuple[SentimentType, float]:
-        """
-        Analyse le sentiment du texte
-        """
+        """Detect language of text"""
         try:
-            # Utiliser TextBlob pour l'analyse de sentiment
-            blob = TextBlob(text)
+            if not text or len(text.strip()) < 10:
+                return "unknown"
             
-            # Score de polarité (-1 à 1)
-            polarity = blob.sentiment.polarity
+            lang = detect(text)
+            return lang
             
-            # Déterminer le type de sentiment
-            if polarity > 0.2:
-                sentiment = SentimentType.POSITIVE
-            elif polarity < -0.2:
-                sentiment = SentimentType.NEGATIVE
-            else:
-                sentiment = SentimentType.NEUTRAL
-            
-            # Confidence basée sur la magnitude
-            confidence = abs(polarity)
-            
-            return sentiment, confidence
-            
+        except LangDetectException:
+            return "unknown"
         except Exception as e:
-            self.logger.warning(f"Erreur analyse sentiment: {e}")
-            return SentimentType.NEUTRAL, 0.0
+            logger.error(f"Language detection failed: {e}")
+            return "unknown"
     
-    def detect_intent(self, text: str) -> Tuple[IntentType, float]:
-        """
-        Détecte l'intention principale du texte
-        """
+    def extract_phone_numbers(self, text: str) -> List[str]:
+        """Extract phone numbers from text"""
+        phones = []
+        
+        for pattern in self.compiled_phone_patterns:
+            matches = pattern.findall(text)
+            for match in matches:
+                if isinstance(match, tuple):
+                    match = match[0]  # Get first group if tuple
+                phones.append(match)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_phones = []
+        for phone in phones:
+            if phone not in seen:
+                seen.add(phone)
+                unique_phones.append(phone)
+        
+        return unique_phones
+    
+    def extract_emails(self, text: str) -> List[str]:
+        """Extract email addresses from text"""
+        if not self.compiled_email_pattern:
+            return []
+        
+        emails = self.compiled_email_pattern.findall(text)
+        return list(set(emails))  # Remove duplicates
+    
+    def extract_names(self, text: str) -> Tuple[Optional[str], Optional[str]]:
+        """Extract first and last names from text"""
+        # Simple pattern matching for Malagasy/French names
+        name_patterns = [
+            r'(?:Je suis|Je m\'appelle|Nom|Prénom|Name)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+            r'([A-Z][a-z]+)\s+([A-Z][a-z]+)',  # First Last pattern
+            r'([A-Z][a-z]+),\s*([A-Z][a-z]+)'  # Last, First pattern
+        ]
+        
+        for pattern in name_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                if isinstance(matches[0], tuple):
+                    # Two groups found (first and last)
+                    return matches[0][0], matches[0][1]
+                else:
+                    # Single group found
+                    names = matches[0].split()
+                    if len(names) >= 2:
+                        return names[0], " ".join(names[1:])
+                    else:
+                        return names[0], None
+        
+        return None, None
+    
+    def extract_address(self, text: str) -> Dict[str, str]:
+        """Extract address information from text"""
+        address_info = {}
+        
+        # Extract Malagasy cities
         text_lower = text.lower()
-        scores = {}
+        for city in self.malagasy_cities:
+            if city in text_lower:
+                address_info['city'] = city.title()
+                break
         
-        # Calculer les scores pour chaque intention
-        for intent_type, keywords in self.keyword_patterns.items():
-            score = 0
-            for keyword in keywords:
-                if keyword in text_lower:
-                    score += 1
-            
-            # Normaliser le score
-            normalized_score = score / len(keywords) if keywords else 0
-            scores[intent_type] = normalized_score
-        
-        # Trouver l'intention avec le score le plus élevé
-        if scores:
-            best_intent = max(scores, key=scores.get)
-            best_score = scores[best_intent]
-            
-            # Convertir en IntentType
-            try:
-                intent_type = IntentType(best_intent)
-            except ValueError:
-                intent_type = IntentType.OTHER
-                best_score = max(best_score, self.min_confidence)
-            
-            # Vérifier le seuil de confiance
-            if best_score >= self.min_confidence:
-                return intent_type, best_score
-        
-        # Par défaut
-        return IntentType.OTHER, 0.5
-    
-    def determine_priority(
-        self, 
-        intent: IntentType, 
-        sentiment: SentimentType,
-        has_urgent_keywords: bool = False
-    ) -> PriorityLevel:
-        """
-        Détermine le niveau de priorité
-        """
-        # Règles de priorité
-        if has_urgent_keywords:
-            return PriorityLevel.URGENT
-        
-        if intent == IntentType.COMPLAINT and sentiment == SentimentType.NEGATIVE:
-            return PriorityLevel.HIGH
-        
-        if intent == IntentType.QUESTION and sentiment == SentimentType.NEGATIVE:
-            return PriorityLevel.HIGH
-        
-        if intent == IntentType.SUPPORT or intent == IntentType.REFUND:
-            return PriorityLevel.MEDIUM
-        
-        if intent == IntentType.ORDER or intent == IntentType.PRICE:
-            return PriorityLevel.MEDIUM
-        
-        return PriorityLevel.LOW
-    
-    def extract_categories(self, text: str, entities: List[Dict]) -> List[str]:
-        """
-        Extrait les catégories du texte
-        """
-        categories = set()
-        
-        # Catégories basées sur les entités
-        for entity in entities:
-            if entity.get("entity_type") == "PRODUCT":
-                categories.add("produit")
-            elif entity.get("entity_type") == "PRICE":
-                categories.add("prix")
-            elif entity.get("entity_type") == "DELIVERY":
-                categories.add("livraison")
-        
-        # Catégories basées sur les mots-clés
-        text_lower = text.lower()
-        
-        category_keywords = {
-            "technique": ["bug", "erreur", "problème", "ne marche pas", "planté"],
-            "commercial": ["commande", "achat", "panier", "paiement"],
-            "logistique": ["livraison", "expédition", "colis", "transport"],
-            "service": ["sav", "support", "assistance", "service client"],
-            "produit": ["caractéristique", "spécification", "fonctionnalité"],
-            "promotion": ["promo", "réduction", "solde", "offre"]
+        # Look for address indicators
+        address_patterns = {
+            'street': r'(?:adresse|adress|address)[:\s]+([^\n,]+)',
+            'district': r'(?:quartier|district)[:\s]+([^\n,]+)',
+            'postal_code': r'(?:code postal|postal code)[:\s]+(\d{5})'
         }
         
-        for category, keywords in category_keywords.items():
-            for keyword in keywords:
-                if keyword in text_lower:
-                    categories.add(category)
-                    break
+        for key, pattern in address_patterns.items():
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                address_info[key] = match.group(1).strip()
         
-        return list(categories)
+        return address_info
     
-    def analyze_comment(self, text: str) -> NLPResult:
-        """
-        Analyse complète d'un commentaire
-        """
-        # Détection de la langue
-        language = self.detect_language(text)
+    def extract_order_items(self, text: str) -> List[Dict[str, Any]]:
+        """Extract order items from text"""
+        items = []
         
-        # Prétraitement
-        cleaned_text = self.preprocess_text(text, language)
+        # Patterns for order extraction
+        patterns = [
+            # Pattern: "2 sacs noirs" or "2x sac noir"
+            r'(\d+)(?:x|\s+)?\s*([^,\n.]+?)(?:\s*,\s*|\n|$)',
+            # Pattern: "Je prends 2 sacs"
+            r'(?:prends|commande|je veux|je voudrais)\s+(\d+)\s+([^,\n.]+)',
+            # Pattern: "sacs: 2"
+            r'([^:\n]+?)[:\s]+(\d+)'
+        ]
         
-        # Analyse de sentiment
-        sentiment, sentiment_confidence = self.analyze_sentiment(text)
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                quantity, product = match
+                try:
+                    quantity = int(quantity)
+                    product = product.strip()
+                    
+                    # Clean up product name
+                    product = re.sub(r'^\s*-\s*', '', product)  # Remove leading dash
+                    product = re.sub(r'\s+', ' ', product)  # Normalize spaces
+                    
+                    items.append({
+                        'product': product,
+                        'quantity': quantity,
+                        'confidence': 0.7
+                    })
+                except ValueError:
+                    continue
         
-        # Détection d'intention
+        return items
+    
+    def extract_prices(self, text: str) -> List[Dict[str, Any]]:
+        """Extract prices from text"""
+        if not self.compiled_price_pattern:
+            return []
+        
+        prices = []
+        matches = self.compiled_price_pattern.findall(text)
+        
+        for match in matches:
+            # Extract numeric value
+            value_match = re.search(r'(\d+[\s,.]?\d*)', match)
+            if value_match:
+                value_str = value_match.group(1).replace(',', '.').replace(' ', '')
+                try:
+                    value = float(value_str)
+                    prices.append({
+                        'value': value,
+                        'currency': self._extract_currency(match),
+                        'text': match
+                    })
+                except ValueError:
+                    continue
+        
+        return prices
+    
+    def _extract_currency(self, text: str) -> str:
+        """Extract currency from price text"""
+        if 'Ar' in text or 'MGA' in text:
+            return 'MGA'
+        elif '€' in text or 'EUR' in text:
+            return 'EUR'
+        elif '$' in text or 'USD' in text:
+            return 'USD'
+        else:
+            return 'unknown'
+    
+    def detect_intent(self, text: str) -> Tuple[str, float]:
+        """Detect user intent from text"""
+        text_lower = text.lower()
+        
+        # Order intent patterns
+        order_keywords = [
+            'je prends', 'je commande', 'commande', 'je veux', 'je voudrais',
+            'livraison', 'livrez', 'expédiez', 'acheter', 'achat',
+            'quantité', 'combien', 'prix', 'coût'
+        ]
+        
+        # Contact intent patterns
+        contact_keywords = [
+            'contact', 'contacter', 'appeler', 'téléphoner', 'appel',
+            'email', 'courriel', 'écrire', 'message', 'whatsapp'
+        ]
+        
+        # Information intent patterns
+        info_keywords = [
+            'information', 'renseignement', 'détails', 'caractéristique',
+            'disponible', 'stock', 'catalogue', 'brochure', 'fiche'
+        ]
+        
+        # Calculate scores
+        order_score = sum(1 for keyword in order_keywords if keyword in text_lower)
+        contact_score = sum(1 for keyword in contact_keywords if keyword in text_lower)
+        info_score = sum(1 for keyword in info_keywords if keyword in text_lower)
+        
+        scores = {
+            'ORDER': order_score,
+            'CONTACT': contact_score,
+            'INFORMATION': info_score
+        }
+        
+        # Get intent with highest score
+        max_intent = max(scores, key=scores.get)
+        max_score = scores[max_intent]
+        
+        # Calculate confidence (normalize between 0 and 1)
+        total_keywords = len(text_lower.split())
+        confidence = min(max_score / max(total_keywords, 1), 1.0)
+        
+        # If no clear intent, mark as unprocessable
+        if confidence < 0.3:
+            return 'UNPROCESSABLE', confidence
+        
+        return max_intent, confidence
+    
+    def extract_all(self, text: str, language: str = None) -> Dict[str, Any]:
+        """Extract all information from text"""
+        start_time = time.time()
+        
+        # Detect language if not provided
+        if not language:
+            language = self.detect_language(text)
+        
+        # Detect intent
         intent, intent_confidence = self.detect_intent(text)
         
-        # Confiance globale
-        confidence = (sentiment_confidence + intent_confidence) / 2
+        # Extract information
+        result = {
+            'text': text,
+            'language': language,
+            'intent': intent,
+            'intent_confidence': intent_confidence,
+            'phone_numbers': self.extract_phone_numbers(text),
+            'emails': self.extract_emails(text),
+            'first_name': None,
+            'last_name': None,
+            'address': self.extract_address(text),
+            'order_items': self.extract_order_items(text),
+            'prices': self.extract_prices(text),
+            'processing_time': time.time() - start_time
+        }
         
-        # Extraction d'entités
-        entities = self.detect_entities(text)
+        # Extract names
+        first_name, last_name = self.extract_names(text)
+        result['first_name'] = first_name
+        result['last_name'] = last_name
         
-        # Extraction de mots-clés
-        keywords = self.extract_keywords(cleaned_text, self.max_keywords)
+        # Calculate total amount if prices found
+        if result['prices']:
+            result['total_amount'] = sum(price['value'] for price in result['prices'])
         
-        # Détection de mots urgents
-        urgent_keywords = ["urgent", "immédiat", "important", "asap", "vite", "rapide"]
-        has_urgent = any(keyword in text.lower() for keyword in urgent_keywords)
-        
-        # Détermination de priorité
-        priority = self.determine_priority(intent, sentiment, has_urgent)
-        
-        # Extraction de catégories
-        categories = self.extract_categories(text, entities)
-        
-        # Créer le résultat
-        result = NLPResult(
-            text=text[:200],  # Tronquer pour l'affichage
-            intent=intent,
-            sentiment=sentiment,
-            confidence=confidence,
-            entities=entities,
-            keywords=keywords,
-            priority=priority,
-            categories=categories,
-            language=language
-        )
-        
+        logger.info(f"NLP extraction completed in {result['processing_time']:.2f}s")
         return result
-    
-    def analyze_comment_intent(self, text: str) -> Dict[str, Any]:
-        """
-        Analyse rapide d'un commentaire pour l'intention (pour webhook)
-        """
-        try:
-            result = self.analyze_comment(text)
-            
-            # Déterminer si c'est prioritaire
-            priority = result.priority in [PriorityLevel.HIGH, PriorityLevel.URGENT]
-            
-            return {
-                "intent": result.intent.value,
-                "sentiment": result.sentiment.value,
-                "confidence": result.confidence,
-                "priority": priority,
-                "entities": result.entities,
-                "categories": result.categories,
-                "language": result.language
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Erreur analyse commentaire: {e}")
-            return {
-                "intent": IntentType.OTHER.value,
-                "sentiment": SentimentType.NEUTRAL.value,
-                "confidence": 0.0,
-                "priority": False,
-                "entities": [],
-                "categories": [],
-                "language": "unknown"
-            }
-    
-    def analyze_message_intent(self, text: str) -> Dict[str, Any]:
-        """
-        Analyse d'un message Messenger
-        """
-        # Similar à analyse_comment_intent mais avec focus sur conversation
-        result = self.analyze_comment_intent(text)
-        
-        # Ajouter des métriques spécifiques aux messages
-        text_lower = text.lower()
-        
-        # Détection de questions
-        is_question = any(q in text_lower for q in ['?', 'comment', 'pourquoi', 'quand', 'où'])
-        
-        # Détection de demande de contact
-        wants_contact = any(word in text_lower for word in 
-                           ['appeler', 'téléphoner', 'contact', 'appel', 'phone', 'tel'])
-        
-        result.update({
-            "is_question": is_question,
-            "wants_contact": wants_contact,
-            "response_needed": is_question or result["priority"]
-        })
-        
-        return result
-    
-    def analyze_post_for_live_commerce(self, text: str) -> Dict[str, Any]:
-        """
-        Analyse un post pour détecter si c'est du live commerce
-        """
-        text_lower = text.lower()
-        
-        # Mots-clés liés au live commerce
-        live_keywords = [
-            "live", "direct", "en direct", "streaming", "vidéo live",
-            "shopping live", "live shopping", "vente en direct",
-            "émission", "diffusion", "en ce moment", "maintenant"
-        ]
-        
-        commerce_keywords = [
-            "promo", "réduction", "offre", "solde", "prix", "coût",
-            "achat", "commande", "acheter", "vendre", "produit",
-            "article", "item", "disponible", "stock", "livraison"
-        ]
-        
-        # Calcul des scores
-        live_score = sum(1 for keyword in live_keywords if keyword in text_lower)
-        commerce_score = sum(1 for keyword in commerce_keywords if keyword in text_lower)
-        
-        # Normalisation
-        total_score = (live_score / len(live_keywords) + commerce_score / len(commerce_keywords)) / 2
-        
-        # Détection d'heure (souvent indiquée dans les lives)
-        time_pattern = r'\b(\d{1,2})[hH](\d{0,2})?\b'
-        has_time = bool(re.search(time_pattern, text))
-        
-        # Détection de date
-        date_pattern = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b'
-        has_date = bool(re.search(date_pattern, text))
-        
-        return {
-            "is_live_commerce": total_score > 0.3,  # Seuil
-            "score": round(total_score, 3),
-            "live_keywords_found": live_score,
-            "commerce_keywords_found": commerce_score,
-            "has_time": has_time,
-            "has_date": has_date,
-            "timestamp_detected": has_time or has_date
-        }
-    
-    def extract_product_info(self, text: str) -> Dict[str, Any]:
-        """
-        Extrait les informations produit d'un texte
-        """
-        entities = self.detect_entities(text)
-        
-        product_info = {
-            "brand": None,
-            "model": None,
-            "color": None,
-            "size": None,
-            "price": None,
-            "quantity": None,
-            "features": []
-        }
-        
-        for entity in entities:
-            if entity.get("entity_type") == "PRODUCT":
-                if entity.get("label") == "MARQUE":
-                    product_info["brand"] = entity["text"]
-                elif entity.get("label") == "COULEUR":
-                    product_info["color"] = entity["text"]
-                elif entity.get("label") == "TAILLE_ECRAN":
-                    product_info["size"] = entity["text"]
-            
-            elif entity.get("entity_type") == "PRICE":
-                if entity.get("label") == "MONTANT":
-                    product_info["price"] = entity["text"]
-        
-        # Détection de quantité
-        quantity_pattern = r'\b(\d+)\s*(pcs|pièces|unités|unité|items?)\b'
-        match = re.search(quantity_pattern, text.lower())
-        if match:
-            product_info["quantity"] = match.group(1)
-        
-        return product_info
-    
-    def generate_auto_response(
-        self, 
-        intent: str, 
-        sentiment: str,
-        language: str = 'fr'
-    ) -> str:
-        """
-        Génère une réponse automatique basée sur l'intention et le sentiment
-        """
-        responses = {
-            'fr': {
-                'question': {
-                    'positive': "Merci pour votre question ! Nous y répondrons rapidement.",
-                    'neutral': "Bonjour, nous traitons votre question et reviendrons vers vous bientôt.",
-                    'negative': "Nous sommes désolés pour ce désagrément. Notre équipe va examiner votre question."
-                },
-                'complaint': {
-                    'positive': "Merci de nous avoir signalé ce problème. Nous le corrigeons.",
-                    'neutral': "Nous prenons en compte votre réclamation et allons la traiter.",
-                    'negative': "Nous nous excusons sincèrement. Notre service client va vous contacter."
-                },
-                'compliment': {
-                    'positive': "Merci beaucoup pour votre compliment ! Cela nous encourage.",
-                    'neutral': "Merci pour votre retour positif.",
-                    'negative': "Merci pour votre commentaire."
-                },
-                'order': {
-                    'positive': "Merci pour votre intérêt ! Nos conseillers sont disponibles pour vous aider.",
-                    'neutral': "Pour toute commande, notre équipe commerciale est à votre disposition.",
-                    'negative': "Nous comprenons vos préoccupations. Parlons-en pour trouver une solution."
-                }
-            },
-            'en': {
-                'question': {
-                    'positive': "Thanks for your question! We'll answer it quickly.",
-                    'neutral': "Hello, we're processing your question and will get back to you soon.",
-                    'negative': "We're sorry for the inconvenience. Our team will review your question."
-                },
-                'complaint': {
-                    'positive': "Thanks for reporting this issue. We're fixing it.",
-                    'neutral': "We've noted your complaint and will handle it.",
-                    'negative': "We sincerely apologize. Our customer service will contact you."
-                },
-                'compliment': {
-                    'positive': "Thank you so much for your compliment! It encourages us.",
-                    'neutral': "Thanks for your positive feedback.",
-                    'negative': "Thank you for your comment."
-                },
-                'order': {
-                    'positive': "Thanks for your interest! Our advisors are available to help you.",
-                    'neutral': "For any order, our sales team is at your disposal.",
-                    'negative': "We understand your concerns. Let's talk to find a solution."
-                }
-            }
-        }
-        
-        # Récupérer la réponse appropriée
-        lang_responses = responses.get(language, responses['fr'])
-        intent_responses = lang_responses.get(intent, lang_responses['question'])
-        response = intent_responses.get(sentiment, intent_responses['neutral'])
-        
-        return response
-    
-    def batch_analyze(self, texts: List[str]) -> List[NLPResult]:
-        """
-        Analyse un lot de textes
-        """
-        results = []
-        for text in texts:
-            try:
-                result = self.analyze_comment(text)
-                results.append(result)
-            except Exception as e:
-                self.logger.error(f"Erreur analyse batch: {e}")
-                # Ajouter un résultat par défaut
-                results.append(NLPResult(
-                    text=text[:200],
-                    intent=IntentType.OTHER,
-                    sentiment=SentimentType.NEUTRAL,
-                    confidence=0.0,
-                    entities=[],
-                    keywords=[],
-                    priority=PriorityLevel.LOW,
-                    categories=[],
-                    language="unknown"
-                ))
-        
-        return results
-    
-    def get_statistics(self, results: List[NLPResult]) -> Dict[str, Any]:
-        """
-        Génère des statistiques à partir d'une liste de résultats
-        """
-        if not results:
-            return {}
-        
-        stats = {
-            "total": len(results),
-            "by_intent": {},
-            "by_sentiment": {},
-            "by_priority": {},
-            "average_confidence": 0,
-            "common_categories": [],
-            "common_keywords": []
-        }
-        
-        # Compter les intentions
-        for result in results:
-            intent = result.intent.value
-            stats["by_intent"][intent] = stats["by_intent"].get(intent, 0) + 1
-            
-            sentiment = result.sentiment.value
-            stats["by_sentiment"][sentiment] = stats["by_sentiment"].get(sentiment, 0) + 1
-            
-            priority = result.priority.value
-            stats["by_priority"][priority] = stats["by_priority"].get(priority, 0) + 1
-        
-        # Calculer la confiance moyenne
-        confidences = [r.confidence for r in results]
-        stats["average_confidence"] = round(sum(confidences) / len(confidences), 3)
-        
-        # Trouver les catégories communes
-        all_categories = []
-        for result in results:
-            all_categories.extend(result.categories)
-        
-        category_counter = Counter(all_categories)
-        stats["common_categories"] = category_counter.most_common(5)
-        
-        # Trouver les mots-clés communs
-        all_keywords = []
-        for result in results:
-            all_keywords.extend(result.keywords)
-        
-        keyword_counter = Counter(all_keywords)
-        stats["common_keywords"] = keyword_counter.most_common(10)
-        
-        return stats
