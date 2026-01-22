@@ -1229,14 +1229,3 @@ async def cleanup_geolocation_files(file_path: str):
 # ==============================================
 # MIDDLEWARE POUR LOGS DE GÉOLOCALISATION
 # ==============================================
-
-@router.middleware("http")
-async def log_geolocation_requests(request, call_next):
-    """
-    Middleware pour logger les requêtes de géolocalisation
-    """
-    if "geocode" in request.url.path:
-        logger.info(f"🌍 Requête géolocalisation: {request.method} {request.url.path}")
-    
-    response = await call_next(request)
-    return response

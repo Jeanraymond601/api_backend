@@ -1,5 +1,5 @@
 # app/schemas.py - VERSION AMÉLIORÉE POUR EXTRACTION INTELLIGENTE
-from pydantic import BaseModel, Field, HttpUrl, validator, root_validator
+from pydantic import BaseModel, Field, HttpUrl, model_validator, validator, root_validator
 from typing import List, Optional, Dict, Any, Union, Literal
 from datetime import datetime, date
 from enum import Enum
@@ -124,20 +124,6 @@ class FileUploadRequest(BaseModel):
     priority: ProcessingPriority = Field(ProcessingPriority.NORMAL)
     extraction_level: ExtractionLevel = Field(ExtractionLevel.STANDARD)
     
-    @root_validator
-    def validate_file_source(cls, values):
-        """Valider qu'au moins une source de fichier est fournie"""
-        file_base64 = values.get('file_base64')
-        file_url = values.get('file_url')
-        
-        if not file_base64 and not file_url:
-            raise ValueError('Either file_base64 or file_url must be provided')
-        
-        if file_base64 and file_url:
-            raise ValueError('Only one of file_base64 or file_url should be provided')
-        
-        return values
-    
     @validator('content_type')
     def validate_content_type(cls, v):
         """Valider le type MIME"""
@@ -156,6 +142,17 @@ class FileUploadRequest(BaseModel):
             raise ValueError(f'Content type {v} not supported')
         
         return v
+    
+    @model_validator(mode='after')
+    def validate_file_source(self):
+        """Valider qu'au moins une source de fichier est fournie"""
+        if not self.file_base64 and not self.file_url:
+            raise ValueError('Either file_base64 or file_url must be provided')
+        
+        if self.file_base64 and self.file_url:
+            raise ValueError('Only one of file_base64 or file_url should be provided')
+        
+        return self
 
 class OCRProcessingRequest(BaseModel):
     """Requête de traitement OCR complet"""
@@ -495,17 +492,14 @@ class CacheItem(BaseModel):
     last_accessed: Optional[datetime] = None
     tags: List[str] = Field(default_factory=list, description="Tags pour invalidation")
     
-    @root_validator
-    def calculate_expires_at(cls, values):
+    @model_validator(mode='after')
+    def calculate_expires_at(self):
         """Calculer la date d'expiration"""
-        ttl = values.get('ttl', 3600)
-        created_at = values.get('created_at')
-        
-        if created_at and ttl:
+        if self.created_at and self.ttl:
             from datetime import timedelta
-            values['expires_at'] = created_at + timedelta(seconds=ttl)
+            self.expires_at = self.created_at + timedelta(seconds=self.ttl)
         
-        return values
+        return self
 
 class CacheStats(BaseModel):
     """Statistiques cache"""

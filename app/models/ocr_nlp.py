@@ -1,5 +1,5 @@
 # app/models.py - VERSION AMÉLIORÉE AVEC GÉOLOCALISATION
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, model_validator, validator
 from typing import List, Optional, Dict, Any, Union, Tuple
 from enum import Enum
 from datetime import datetime, date
@@ -298,28 +298,18 @@ class OrderItem(BaseModel):
         except (ValueError, TypeError):
             return 1.0
     
-    @root_validator
-    def calculate_totals(cls, values):
-        """Calculer les totaux automatiquement"""
-        quantity = values.get('quantity', 1.0)
-        unit_price = values.get('unit_price')
-        discount_rate = values.get('discount_rate', 0.0)
-        tax_rate = values.get('tax_rate', 0.0)
+    @model_validator(mode='after')
+    def calculate_totals(self):
+        if self.order_items:
+            subtotal = sum(item.total_before_tax or 0 for item in self.order_items)
+            total_tax = sum(item.total_tax or 0 for item in self.order_items)
+            total_amount = sum(item.total_price or 0 for item in self.order_items)
         
-        if unit_price is not None:
-            # Calcul HT après remise
-            total_before_tax = quantity * unit_price * (1 - discount_rate)
-            values['total_before_tax'] = round(total_before_tax, 2)
-            
-            # Calcul TVA
-            total_tax = total_before_tax * tax_rate
-            values['total_tax'] = round(total_tax, 2)
-            
-            # Calcul TTC
-            total_price = total_before_tax + total_tax
-            values['total_price'] = round(total_price, 2)
-        
-        return values
+            self.subtotal = round(subtotal, 2)
+            self.total_tax = round(total_tax, 2)
+            self.total_amount = round(total_amount, 2)
+    
+        return self
 
 class DeliveryInfo(BaseModel):
     """Informations livraison"""
@@ -434,21 +424,19 @@ class NLPResult(BaseModel):
     validation_errors: List[str] = Field(default_factory=list)
     extraction_timestamp: datetime = Field(default_factory=datetime.now)
     
-    @root_validator
-    def calculate_totals(cls, values):
+    @model_validator(mode='after')
+    def calculate_totals(self):
         """Calculer les totaux automatiquement depuis les articles"""
-        order_items = values.get('order_items', [])
-        
-        if order_items:
-            subtotal = sum(item.total_before_tax or 0 for item in order_items)
-            total_tax = sum(item.total_tax or 0 for item in order_items)
-            total_amount = sum(item.total_price or 0 for item in order_items)
+        if self.order_items:
+            subtotal = sum(item.total_before_tax or 0 for item in self.order_items)
+            total_tax = sum(item.total_tax or 0 for item in self.order_items)
+            total_amount = sum(item.total_price or 0 for item in self.order_items)
             
-            values['subtotal'] = round(subtotal, 2)
-            values['total_tax'] = round(total_tax, 2)
-            values['total_amount'] = round(total_amount, 2)
+            self.subtotal = round(subtotal, 2)
+            self.total_tax = round(total_tax, 2)
+            self.total_amount = round(total_amount, 2)
         
-        return values
+        return self
     
     @property
     def item_count(self) -> int:

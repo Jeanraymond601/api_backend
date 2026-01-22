@@ -1,36 +1,36 @@
-# Import TOUT depuis app/schemas/ocr_nlp.py
+# app/schemas/__init__.py - CORRIGÉ
+
+# Import TOUT depuis app/schemas.py (où les classes sont réellement définies)
 from .ocr_nlp import (
     FileUploadRequest,
     HealthCheckResponse,
     SystemMetrics,
-    OCRProcessingOptions,
     ImageProcessingOptions,
     OrderCreationRequest,
     IntegrationResponse,
     ProcessingStats,
     StandardResponse,
-    ErrorResponse,  # Celui de ocr_nlp.py, pas de schemas.py
-    # Ajoute les autres si nécessaire
+    ErrorResponse,  # Celui de schemas.py
     LanguageStats,
     IntentStats,
-    ValidationError,
+    ValidationErrorDetail,  # Note: C'est ValidationErrorDetail, pas ValidationError
     ValidationErrorResponse,
     WebhookPayload,
     WebhookConfig,
-    CacheItem
+    CacheItem,
+    # Ajoute toutes les autres classes dont tu as besoin
 )
 
-# Si tu as besoin de l'ErrorResponse de schemas.py aussi, tu peux l'importer avec un alias
-from .schemas import ErrorResponse as MainErrorResponse
+# Crée un alias pour compatibilité
+OCRProcessingOptions = ImageProcessingOptions
 
-# Définir quel ErrorResponse utiliser
-# Je recommande d'utiliser celui de ocr_nlp.py pour la compatibilité OCR
-# Mais si d'autres modules utilisent celui de schemas.py, on peut faire :
+# Crée un alias si ValidationError est utilisé au lieu de ValidationErrorDetail
+ValidationError = ValidationErrorDetail
 
 __all__ = [
     # OCR/NLP schemas
     "StandardResponse",
-    "ErrorResponse",  # Celui de ocr_nlp.py
+    "ErrorResponse",
     "FileUploadRequest",
     "HealthCheckResponse",
     "SystemMetrics",
@@ -41,12 +41,9 @@ __all__ = [
     "ProcessingStats",
     "LanguageStats",
     "IntentStats",
-    "ValidationError",
+    "ValidationError",  # L'alias
     "ValidationErrorResponse",
     "WebhookPayload",
     "WebhookConfig",
     "CacheItem",
-    
-    # Pour compatibilité avec d'autres modules qui utilisent MainErrorResponse
-    "MainErrorResponse"
 ]
